@@ -1,15 +1,19 @@
-import { v4 as uuidv4 } from 'uuid';
 import type { SemanticGraphLite } from './semanticGraphLite.js';
-import type { PhraseNode, PhraseChunk } from '../types/index.js';
+import type { PhraseNode } from '../types/index.js';
 import { analyzeText, extractChunks } from './nlp.js';
 import { recordChunks } from './chunkCatalog.js';
-import { analyzePotentialPOS, getPOSGuessSources } from './posHeuristics.js';
-import { isStopWord, isOnlyStopWords, getStopWordRatio } from './stopWords.js';
+import { analyzePotentialPOS, analyzePotentialPOSWithContext, getPOSGuessSources } from './posHeuristics.js';
+import { isStopWord, getStopWordRatio } from './stopWords.js';
 
 export interface IngestionResult {
   phrase: PhraseNode;
   wordsCreated: number;
   chunksExtracted: number;
+}
+
+export interface ContextFrame {
+  topicId: string;
+  sessionId: string;
 }
 
 export class IngestionPipeline {
@@ -26,9 +30,9 @@ export class IngestionPipeline {
     return IngestionPipeline.instance;
   }
 
-  async ingestPhraseText(text: string, graph: SemanticGraphLite): Promise<IngestionResult> {
+  async ingestPhraseText(text: string, graph: SemanticGraphLite, contextFrame?: ContextFrame): Promise<IngestionResult> {
     // Step 1: NLP analysis
-    const { tokens, lemmas, pos } = await analyzeText(text);
+    const { tokens, lemmas, pos, morphFeatures } = await analyzeText(text);
     
     if (tokens.length === 0) {
       throw new Error('No tokens found in text');
@@ -50,17 +54,27 @@ export class IngestionPipeline {
     const wordIds: string[] = [];
     const wordMap = new Map<string, string>(); // lemma -> wordId
     
-    tokens.forEach((token, index) => {
+    // Process words with enhanced POS detection
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
       // Only create word nodes for non-stop words
       if (!isStopWord(token)) {
         const lemma = lemmas[index];
         if (!wordMap.has(lemma)) {
-          // Use POS heuristics to get potential POS tags
-          const potentialPOS = analyzePotentialPOS(lemma, pos[index]); // Use lemma instead of token
-          const sources = getPOSGuessSources(lemma, pos[index]); // Use lemma instead of token
+          // Use enhanced POS heuristics with context testing to get potential POS tags
+          let potentialPOS: string[];
+          try {
+            potentialPOS = await analyzePotentialPOSWithContext(lemma, pos[index]);
+          } catch (error) {
+            console.warn(`Enhanced POS analysis failed for "${lemma}", falling back to basic analysis:`, error);
+            potentialPOS = analyzePotentialPOS(lemma, pos[index]);
+          }
+          
+          const sources = getPOSGuessSources(lemma, pos[index]);
           
           // Create word with normalized lemma as both text and lemma
-          const word = graph.upsertWord(lemma, lemma, potentialPOS, pos[index]);
+          const morphPos = morphFeatures[index] ? `${pos[index]}:${morphFeatures[index]}` : pos[index];
+          const word = graph.upsertWord(lemma, lemma, potentialPOS, morphPos);
           
           // Update the word with POS potential sources if it's a new word
           if (word.posPotentialSource?.includes('initial')) {
@@ -70,7 +84,8 @@ export class IngestionPipeline {
           wordMap.set(lemma, word.id);
         } else {
           // Update existing word with current POS observation
-          graph.upsertWord(lemma, lemma, [], pos[index]); // Use lemma instead of token
+          const morphPos = morphFeatures[index] ? `${pos[index]}:${morphFeatures[index]}` : pos[index];
+          graph.upsertWord(lemma, lemma, [], morphPos);
         }
         wordIds.push(wordMap.get(lemma)!);
       } else {
@@ -78,7 +93,7 @@ export class IngestionPipeline {
         // the wordIds array alignment with the original tokens
         wordIds.push(''); // Placeholder for stop words
       }
-    });
+    }
 
     // Step 3: Compute phrase posPattern (using original POS)
     const posPattern = this.inferPosPattern(pos);
@@ -96,6 +111,19 @@ export class IngestionPipeline {
     // Step 6: Update chunk catalog
     recordChunks(phrase.id, topChunks);
 
+    // Step 7: Attach Topic & Session context if available
+    if (contextFrame) {
+      graph.linkAboutTopic(phrase.id, contextFrame.topicId, 1.0, 'user');
+      graph.linkCreatedInSession(phrase.id, contextFrame.sessionId);
+      
+      // Add context metadata to phrase
+      phrase.meta = phrase.meta ?? {};
+      phrase.meta.context = {
+        topicId: contextFrame.topicId,
+        sessionId: contextFrame.sessionId,
+      };
+    }
+
     return {
       phrase,
       wordsCreated: wordMap.size,
@@ -103,7 +131,7 @@ export class IngestionPipeline {
     };
   }
 
-  promoteChunk(parentPhraseId: string, chunkId: string, graph: SemanticGraphLite): PhraseNode | null {
+  async promoteChunk(parentPhraseId: string, chunkId: string, graph: SemanticGraphLite): Promise<PhraseNode | null> {
     // Find the parent phrase
     const parentPhrase = graph.getNodesByType('PHRASE').find(p => p.id === parentPhraseId) as PhraseNode;
     if (!parentPhrase) {
@@ -132,17 +160,26 @@ export class IngestionPipeline {
     const chunkWordIds: string[] = [];
     const chunkPosArray = chunk.posPattern.split('-');
     
-    chunk.lemmas.forEach((lemma, index) => {
+    // Process chunk lemmas with enhanced POS detection
+    for (let index = 0; index < chunk.lemmas.length; index++) {
+      const lemma = chunk.lemmas[index];
       // Only create word nodes for non-stop words
       if (!isStopWord(lemma)) {
         // Find existing word or create new one
         const existingWords = graph.getNodesByType('WORD');
-        let word = existingWords.find(w => w.lemma === lemma) as any;
+        let word = existingWords.find(w => w.type === 'WORD' && (w as any).lemma === lemma) as any;
         
         if (!word) {
-          // Create new word node with POS heuristics
+          // Create new word node with enhanced POS heuristics
           const chunkPOS = chunkPosArray[index] || 'X';
-          const potentialPOS = analyzePotentialPOS(lemma, chunkPOS);
+          let potentialPOS: string[];
+          try {
+            potentialPOS = await analyzePotentialPOSWithContext(lemma, chunkPOS);
+          } catch (error) {
+            console.warn(`Enhanced POS analysis failed for "${lemma}" in chunk, falling back to basic analysis:`, error);
+            potentialPOS = analyzePotentialPOS(lemma, chunkPOS);
+          }
+          
           const sources = getPOSGuessSources(lemma, chunkPOS);
           
           word = graph.upsertWord(lemma, lemma, potentialPOS, chunkPOS);
@@ -163,7 +200,7 @@ export class IngestionPipeline {
         // the wordIds array alignment with the original chunk lemmas
         chunkWordIds.push(''); // Placeholder for stop words
       }
-    });
+    }
 
     // Create new PHRASE node from chunk (preserving original lemmas and POS)
     // Filter out empty word IDs (placeholders for stop words)
@@ -193,7 +230,7 @@ export class IngestionPipeline {
     // Map to our canonical format
     const posMap: Record<string, string> = {
       'NOUN': 'NOUN',
-      'PROPN': 'NOUN',
+      'PROPN': 'PROPN', // Keep proper nouns as PROPN
       'VERB': 'VERB',
       'ADJ': 'ADJ',
       'ADV': 'ADV',
@@ -215,8 +252,8 @@ export class IngestionPipeline {
 // Export singleton instance and convenience functions
 export const ingestionPipeline = IngestionPipeline.getInstance();
 
-export const ingestPhraseText = async (text: string, graph: SemanticGraphLite): Promise<IngestionResult> => 
-  ingestionPipeline.ingestPhraseText(text, graph);
+export const ingestPhraseText = async (text: string, graph: SemanticGraphLite, contextFrame?: ContextFrame): Promise<IngestionResult> => 
+  ingestionPipeline.ingestPhraseText(text, graph, contextFrame);
 
-export const promoteChunk = (parentPhraseId: string, chunkId: string, graph: SemanticGraphLite): PhraseNode | null => 
+export const promoteChunk = async (parentPhraseId: string, chunkId: string, graph: SemanticGraphLite): Promise<PhraseNode | null> => 
   ingestionPipeline.promoteChunk(parentPhraseId, chunkId, graph);

@@ -1,7 +1,11 @@
 import type { SemanticGraphLite } from './semanticGraphLite.js';
-import type { PhraseNode, PromptNode, PromptSlotBinding } from '../types/index.js';
-import { TEMPLATES, getRandomWordForSlot, getWordsForSlot } from './templates.js';
+import type { PhraseNode, PromptNode, PromptSlotBinding, UserTemplate, SlotDescriptor, POS, SessionLocks, EphemeralPrompt } from '../types/index.js';
+import type { ContextualNodeSets } from '../contexts/ActiveNodesContext.js';
+import { TEMPLATES, getRandomWordForSlot } from './templates.js';
 import { surfaceRelatedPhrases } from './retrieve.js';
+import { listSessionTemplates } from './sessionTemplates.js';
+import { getSessionLocks } from './sessionLocks.js';
+import wordBank from './templates.js';
 
 export interface PromptResult {
   promptText: string;
@@ -198,3 +202,240 @@ export const createPromptFromPhrase = (
   template: typeof TEMPLATES[0],
   graph: SemanticGraphLite
 ) => promptEngine.createPromptFromPhrase(phrase, template, graph);
+
+// NEW: Enhanced Template system functions
+
+// Utility: convert POS pattern ("ADV-NOUN-VERB-…") to unnumbered slots
+export function posPatternToSlots(pattern: string): SlotDescriptor[] {
+  const parts = pattern.split('-').map(s => s.trim().toUpperCase()) as POS[];
+  return parts.map((pos) => {
+    return { kind: 'slot', pos };  // No auto-numbering
+  });
+}
+
+// Build available templates: context phrases -> POS templates, context chunks -> chunk templates, plus user session templates
+export function getAvailableTemplates(ctx: ContextualNodeSets, sessionId: string): UserTemplate[] {
+  const userTpls = listSessionTemplates(sessionId);
+  const phraseTpls: UserTemplate[] = ctx.phrases.map(p => ({
+    id: `phrase:${p.id}`,
+    text: `[${p.posPattern.replace(/-/g, ' ')}]`,
+    slots: posPatternToSlots(p.posPattern),
+    source: 'phrase',
+    createdInSessionId: sessionId,
+    baseText: p.text,  // Add base text for phrase templates
+  }));
+  const chunkTpls: UserTemplate[] = ctx.chunks.map(c => ({
+    id: `chunk:${c.id}`,
+    text: `[${c.posPattern}]`,
+    slots: [{ kind: 'chunk', pos: 'NOUN', chunkPattern: c.posPattern }],
+    source: 'chunk',
+    createdInSessionId: sessionId,
+  }));
+  const merged = new Map<string, UserTemplate>();
+  [...phraseTpls, ...chunkTpls, ...userTpls].forEach(t => merged.set(t.id, t));
+  return [...merged.values()];
+}
+
+// Random helper (seeded optional)
+function mulberry32(seed: number) {
+  return function() {
+    let t = (seed += 0x6D2B79F5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Helper function to parse morphological specifiers from POS tags
+function parseMorphSpecifier(pos: string): { basePos: string; morph?: string } {
+  if (pos.includes(':')) {
+    const [basePos, morph] = pos.split(':');
+    return { basePos, morph };
+  }
+  return { basePos: pos };
+}
+
+// Fill a single template randomly, enforcing POS, locks first, then ctx, then bank.
+export function fillTemplateSlotsRandom(
+  tpl: UserTemplate,
+  ctx: ContextualNodeSets,
+  locks: SessionLocks,
+  rng: () => number
+): { text: string; bindings: EphemeralPrompt['bindings']; templateSignature: string } | null {
+  const bindings: EphemeralPrompt['bindings'] = [];
+  
+  // Get base text if this is a phrase template
+  let baseWords: string[] = [];
+  if (tpl.source === 'phrase' && tpl.baseText) {
+    baseWords = tpl.baseText.split(/\s+/);
+  }
+
+  // Index ctx words by POS
+  const wordsByPOS = new Map<POS, any[]>();
+  const POS_ALL: POS[] = ['NOUN','VERB','VERB:participle','VERB:past','VERB:present_3rd','ADJ','ADJ:comparative','ADJ:superlative','ADV','ADP','DET','PRON','PROPN','AUX'];
+  POS_ALL.forEach(pos => wordsByPOS.set(pos, ctx.words.filter(w => w.pos?.includes(pos))));
+
+  const pick = <T,>(arr: T[]) => (arr.length ? arr[Math.floor(rng() * arr.length)] : undefined);
+
+  // Only memoize explicitly numbered slots
+  const chosenByKey = new Map<string, { nodeId?: string; bank?: string }>();
+
+  for (let i = 0; i < tpl.slots.length; i++) {
+    const slot = tpl.slots[i];
+    
+    if (slot.kind === 'chunk') {
+      // Handle chunk slots (unchanged)
+      const locked = new Set(locks.lockedChunkIds ?? []);
+      const candidates = ctx.chunks.filter(c => c.posPattern === slot.chunkPattern);
+      const lockedFirst = candidates.filter(c => locked.has(c.id)).concat(candidates.filter(c => !locked.has(c.id)));
+      const chosen = pick(lockedFirst);
+      if (!chosen) return null;
+      bindings.push({ slot, nodeId: chosen.id });
+      continue;
+    }
+
+    // Handle word slots
+    const key = slot.index !== undefined ? `${slot.pos}:${slot.index}` : null;
+    
+    // Check if we already chose this numbered slot
+    if (key && chosenByKey.has(key)) {
+      bindings.push({ slot, ...chosenByKey.get(key)! });
+      continue;
+    }
+
+    // For unnumbered slots, try base text first
+    if (slot.index === undefined && baseWords.length > i) {
+      const baseWord = baseWords[i];
+      
+      // Try to find word with matching morphological feature
+      const { basePos, morph } = parseMorphSpecifier(slot.pos);
+      if (morph) {
+        const morphWord = ctx.words.find(w => 
+          w.lemma === baseWord && w.morphFeature === morph
+        );
+        if (morphWord) {
+          bindings.push({ slot, nodeId: morphWord.id });
+          continue;
+        }
+      }
+      
+      // Fall back to regular base word
+      bindings.push({ slot, nodeId: 'base', bank: baseWord });
+      continue;
+    }
+
+    // For numbered slots or when no base text available, randomize
+    const lockedSet = new Set(locks.lockedWordIds ?? []);
+
+    // Enhanced word finding with morphological matching
+    const findWordByMorph = (pos: string) => {
+      const { basePos, morph } = parseMorphSpecifier(pos);
+      
+      if (morph) {
+        // Try to find word with matching morphological feature
+        const morphWord = ctx.words.find(w => 
+          w.pos?.includes(basePos) && w.morphFeature === morph
+        );
+        if (morphWord) return morphWord;
+      }
+      
+      // Fall back to regular matching
+      return ctx.words.find(w => w.pos?.includes(basePos));
+    };
+
+    // 1) Try locked words first
+    const lockedPool = wordsByPOS.get(slot.pos)!.filter(w => lockedSet.has(w.id));
+    let chosenWord = pick(lockedPool);
+
+    // 2) Try context words with morphological matching
+    if (!chosenWord) {
+      const morphWord = findWordByMorph(slot.pos);
+      if (morphWord) {
+        chosenWord = morphWord;
+      } else {
+        // Fall back to regular context words
+        const ctxPool = wordsByPOS.get(slot.pos)!;
+        chosenWord = pick(ctxPool);
+      }
+    }
+
+    // 3) Fall back to word bank
+    if (!chosenWord) {
+      const bank = (wordBank[slot.pos] ?? []);
+      const chosenLemma = pick(bank);
+      if (!chosenLemma) return null;
+      const chosen = { bank: chosenLemma };
+      if (key) chosenByKey.set(key, chosen);
+      bindings.push({ slot, ...chosen });
+      continue;
+    }
+
+    const chosen = { nodeId: chosenWord.id };
+    if (key) chosenByKey.set(key, chosen);
+    bindings.push({ slot, ...chosen });
+  }
+
+  // Render final text
+  const out = bindings.map(b => {
+    if (b.slot.kind === 'chunk') {
+      const ch = ctx.chunks.find(x => x.id === b.nodeId);
+      return ch?.text ?? '';
+    }
+    if (b.nodeId === 'base') {
+      return b.bank ?? '';
+    }
+    if (b.nodeId) {
+      const w = ctx.words.find(x => x.id === b.nodeId);
+      return w?.lemma ?? '';
+    }
+    return b.bank ?? '';
+  }).join(' ').trim();
+
+  const rendered = out ? out[0].toUpperCase() + out.slice(1) : '';
+  const signature = tpl.slots.map(s => s.kind === 'chunk' ? (s.chunkPattern ?? '') : `${s.pos}${s.index ?? ''}`).join('-');
+  return { text: rendered, bindings, templateSignature: signature };
+}
+
+// Generate multiple ephemeral prompts (no storage). Respects locked templates first.
+export function generateEphemeralPrompts(
+  graph: any, // keep generic to avoid tight coupling here
+  ctx: ContextualNodeSets,
+  sessionId: string,
+  count = 20,
+  seed?: number
+): EphemeralPrompt[] {
+  const rng = mulberry32(seed ?? Math.floor(Math.random() * 1e9));
+  const templates = getAvailableTemplates(ctx, sessionId);
+  const locks = getSessionLocks(graph, sessionId);
+
+  // prioritize pinned or explicitly locked templates
+  const hardTplIds = new Set([...(locks.lockedTemplateIds ?? [])]);
+  const hard = templates.filter(t => hardTplIds.has(t.id) || t.pinned);
+  const soft = templates.filter(t => !hardTplIds.has(t.id) && !t.pinned);
+  const ordered = hard.concat(soft);
+
+  const recentTexts = new Set<string>();
+  const out: EphemeralPrompt[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const tpl = ordered[Math.floor(rng() * ordered.length)];
+    if (!tpl) break;
+
+    const filled = fillTemplateSlotsRandom(tpl, ctx, locks, rng);
+    if (!filled) { continue; }
+
+    // basic dedupe: avoid identical text within this burst
+    if (recentTexts.has(filled.text)) { continue; }
+    recentTexts.add(filled.text);
+
+    out.push({
+      templateId: tpl.id,
+      templateSignature: filled.templateSignature,
+      text: filled.text,
+      bindings: filled.bindings,
+      randomSeed: String(seed ?? 'r' + Math.floor(Math.random() * 1e9)),
+    });
+  }
+
+  return out;
+}

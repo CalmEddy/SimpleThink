@@ -3,15 +3,19 @@ import type {
   NodeId,
   EdgeId,
   Node,
+  NodeType,
   WordNode,
   PhraseNode,
   PromptNode,
   ResponseNode,
+  TopicNode,
+  SessionNode,
   Edge,
   EdgeType,
   GraphJSON,
   PhraseChunk,
   PromptSlotBinding,
+  SessionLocks,
 } from '../types/index.js';
 import { auditPosPotentialForLemma } from './wordAnalysis.js';
 
@@ -51,6 +55,15 @@ export class SemanticGraphLite {
         const normalizedPOS = this.normalizePOS(currentPOS);
         existingWord.posObserved[normalizedPOS] = (existingWord.posObserved[normalizedPOS] || 0) + 1;
         
+        // Store morphological feature from currentPOS if it contains ':'
+        if (currentPOS.includes(':')) {
+          const [, morph] = currentPOS.split(':');
+          existingWord.morphFeature = morph;
+        }
+        
+        // Store original form
+        existingWord.originalForm = text;
+        
         // Recompute primaryPOS and isPolysemousPOS
         this.updateWordPOSStats(existingWord);
       }
@@ -61,6 +74,10 @@ export class SemanticGraphLite {
         ...existingWord,
         pos: mergedPos,
       };
+      
+      // Update polysemy status after merging POS tags
+      this.updateWordPOSStats(updatedWord);
+      
       this.nodes.set(existingWord.id, updatedWord);
       return updatedWord;
     }
@@ -81,13 +98,23 @@ export class SemanticGraphLite {
       text,
       lemma,
       pos,
+      originalForm: text,
       posPotential,
       posPotentialSource: ['initial'],
       posObserved,
       primaryPOS: posPotential[0] || 'NOUN',
-      isPolysemousPOS: false, // Start as false, will be updated based on observed evidence
+      isPolysemousPOS: false, // Will be updated immediately below
       stats: { uses: 0, likes: 0 },
     };
+
+    // Store morphological feature from currentPOS if it contains ':'
+    if (currentPOS && currentPOS.includes(':')) {
+      const [, morph] = currentPOS.split(':');
+      word.morphFeature = morph;
+    }
+
+    // Immediately update polysemy status based on potential POS tags
+    this.updateWordPOSStats(word);
 
     this.nodes.set(wordId, word);
     this.updateWordIndex(word);
@@ -165,7 +192,7 @@ export class SemanticGraphLite {
   private normalizePOS(pos: string): string {
     const posMap: Record<string, string> = {
       'NOUN': 'NOUN',
-      'PROPN': 'NOUN',
+      'PROPN': 'PROPN', // Keep proper nouns as PROPN
       'VERB': 'VERB',
       'ADJ': 'ADJ',
       'ADV': 'ADV',
@@ -198,22 +225,14 @@ export class SemanticGraphLite {
       }
     }
     
-    // Determine if word is polysemous
+    // Simple polysemy detection: word is polysemous if it has multiple POS tags
+    // Check both observed POS and potential POS
     const observedPOS = Object.keys(word.posObserved);
-    let isPolysemous = false;
+    const potentialPOS = word.posPotential || [];
+    const allPOS = [...new Set([...observedPOS, ...potentialPOS])];
     
-    if (observedPOS.length >= 2) {
-      // Check if secondary POS have sufficient evidence
-      const primaryCount = word.posObserved[primaryPOS] || 0;
-      const secondaryPOS = observedPOS.filter(pos => pos !== primaryPOS);
-      
-      isPolysemous = secondaryPOS.some(pos => {
-        const count = word.posObserved[pos] || 0;
-        // Consider polysemous if secondary POS has at least 2 occurrences
-        // OR if secondary POS has at least 1 occurrence and primary count is exactly 2
-        return count >= 2 || (count >= 1 && primaryCount === 2);
-      });
-    }
+    // Word is polysemous if it has more than one POS tag
+    const isPolysemous = allPOS.length > 1;
     
     // Update the word
     word.primaryPOS = primaryPOS;
@@ -407,6 +426,75 @@ export class SemanticGraphLite {
     return Array.from(this.edges.values());
   }
 
+  // Topic operations
+  getTopicByText(text: string): TopicNode | undefined {
+    const canon = text.trim().toLowerCase();
+    const topics = this.getNodesByType('TOPIC') as TopicNode[];
+    return topics.find(t => t.text.toLowerCase() === canon);
+  }
+
+  upsertTopic(text: string, lemmas: string[], posPattern?: string, keywords?: string[]): TopicNode {
+    const existing = this.getTopicByText(text);
+    if (existing) {
+      existing.updatedAt = Date.now();
+      if (keywords?.length) existing.keywords = keywords;
+      return existing;
+    }
+    
+    const topicId = uuidv4();
+    const topic: TopicNode = {
+      id: topicId,
+      type: 'TOPIC',
+      text,
+      lemmas,
+      posPattern,
+      keywords,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    
+    this.nodes.set(topicId, topic);
+    return topic;
+  }
+
+  // Session operations
+  openSession(topicId: string, entityBindings?: SessionNode['entityBindings']): SessionNode {
+    const sessionId = uuidv4();
+    const session: SessionNode = {
+      id: sessionId,
+      type: 'SESSION',
+      topicId,
+      startedAt: Date.now(),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      entityBindings,
+    };
+    
+    this.nodes.set(sessionId, session);
+    
+    // Create edge from session to topic
+    this.addEdge(sessionId, topicId, 'SESSION_OF_TOPIC');
+    
+    return session;
+  }
+
+  endSession(sessionId: string): void {
+    const session = this.nodes.get(sessionId);
+    if (session && session.type === 'SESSION') {
+      (session as SessionNode).endedAt = Date.now();
+      (session as SessionNode).updatedAt = Date.now();
+    }
+  }
+
+  // Context linking methods
+  linkAboutTopic(fromNodeId: string, topicId: string, confidence = 1, origin: 'user'|'promotion'|'import' = 'user'): void {
+    this.addEdge(fromNodeId, topicId, 'PHRASE_ABOUT_TOPIC', { confidence, origin });
+  }
+
+  linkCreatedInSession(fromNodeId: string, sessionId: string): void {
+    this.addEdge(fromNodeId, sessionId, 'CREATED_IN_SESSION');
+  }
+
   // POS Potential Audit methods
   async auditWordPosPotential(word: WordNode): Promise<void> {
     const { pos, sources } = await auditPosPotentialForLemma(word.lemma);
@@ -420,5 +508,58 @@ export class SemanticGraphLite {
     for (const w of words) {
       await this.auditWordPosPotential(w);
     }
+  }
+
+  // Cleanup corrupted edges with undefined IDs
+  cleanupCorruptedEdges(): number {
+    const edgesToRemove: EdgeId[] = [];
+    
+    this.edges.forEach((edge, edgeId) => {
+      if (!edge.from || !edge.to) {
+        console.log('🧹 Removing corrupted edge:', edgeId, edge);
+        edgesToRemove.push(edgeId);
+      }
+    });
+    
+    edgesToRemove.forEach(edgeId => {
+      this.edges.delete(edgeId);
+    });
+    
+    console.log('🧹 Cleaned up', edgesToRemove.length, 'corrupted edges');
+    return edgesToRemove.length;
+  }
+
+  // Recovery function to restore from backup
+  async recoverFromBackup(): Promise<boolean> {
+    try {
+      // Try to load from backup using the persistence manager
+      const { PersistentStore } = await import('./persistentStore.js');
+      const backupData = await PersistentStore.load();
+      
+      if (backupData && backupData.edges && backupData.edges.length > 0) {
+        console.log('🔄 Recovering graph from backup with', backupData.edges.length, 'edges');
+        this.fromJSON(backupData);
+        return true;
+      } else {
+        console.log('❌ No backup data found to recover from');
+        return false;
+      }
+    } catch (error) {
+      console.error('❌ Failed to recover from backup:', error);
+      return false;
+    }
+  }
+
+  // --- NEW: persist/retrieve session locks on the SessionNode ---
+  getSessionLocks(sessionId: string): SessionLocks | undefined {
+    const session = this.nodes.get(sessionId) as SessionNode | undefined;
+    return (session as any)?.locks as SessionLocks | undefined;
+  }
+
+  setSessionLocks(sessionId: string, locks: SessionLocks): void {
+    const session = this.nodes.get(sessionId) as SessionNode | undefined;
+    if (!session) return;
+    (session as any).locks = locks;
+    // Note: In a real implementation, you'd want to trigger graph updates here
   }
 }

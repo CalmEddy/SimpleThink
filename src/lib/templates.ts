@@ -47,70 +47,31 @@ export const TEMPLATES: Template[] = [
   },
 ];
 
-// Word bank for filling missing slots
-export const WORD_BANK: Record<string, string[]> = {
-  NOUN: [
-    'idea', 'concept', 'solution', 'problem', 'challenge', 'opportunity',
-    'innovation', 'creativity', 'imagination', 'inspiration', 'vision',
-    'dream', 'goal', 'purpose', 'mission', 'journey', 'adventure',
-    'discovery', 'breakthrough', 'success', 'achievement', 'progress',
-    'growth', 'development', 'evolution', 'transformation', 'change',
-    'future', 'present', 'past', 'time', 'space', 'world', 'universe',
-    'life', 'love', 'hope', 'joy', 'peace', 'freedom', 'truth',
-    'beauty', 'wisdom', 'knowledge', 'learning', 'teaching', 'sharing',
-    'connection', 'relationship', 'community', 'family', 'friendship',
-    'collaboration', 'partnership', 'team', 'group', 'organization',
-    'company', 'business', 'project', 'work', 'play', 'fun', 'happiness'
-  ],
-  VERB: [
-    'create', 'build', 'make', 'design', 'develop', 'invent', 'discover',
-    'explore', 'investigate', 'analyze', 'understand', 'learn', 'teach',
-    'share', 'communicate', 'connect', 'collaborate', 'cooperate', 'help',
-    'support', 'encourage', 'inspire', 'motivate', 'empower', 'enable',
-    'facilitate', 'guide', 'lead', 'direct', 'manage', 'organize',
-    'plan', 'strategize', 'think', 'imagine', 'dream', 'visualize',
-    'envision', 'conceive', 'generate', 'produce', 'deliver', 'achieve',
-    'accomplish', 'succeed', 'excel', 'improve', 'enhance', 'optimize',
-    'transform', 'change', 'evolve', 'grow', 'develop', 'progress',
-    'advance', 'move', 'travel', 'journey', 'explore', 'adventure',
-    'experience', 'feel', 'sense', 'perceive', 'observe', 'notice',
-    'recognize', 'appreciate', 'value', 'love', 'care', 'nurture'
-  ],
-  ADJ: [
-    'creative', 'innovative', 'original', 'unique', 'special', 'extraordinary',
-    'amazing', 'wonderful', 'fantastic', 'brilliant', 'genius', 'clever',
-    'smart', 'intelligent', 'wise', 'insightful', 'profound', 'deep',
-    'meaningful', 'significant', 'important', 'valuable', 'precious',
-    'beautiful', 'gorgeous', 'stunning', 'magnificent', 'splendid',
-    'excellent', 'outstanding', 'remarkable', 'impressive', 'powerful',
-    'strong', 'resilient', 'flexible', 'adaptable', 'versatile',
-    'dynamic', 'energetic', 'vibrant', 'lively', 'active', 'engaging',
-    'inspiring', 'motivating', 'encouraging', 'supportive', 'helpful',
-    'kind', 'generous', 'compassionate', 'empathetic', 'understanding',
-    'patient', 'calm', 'peaceful', 'serene', 'tranquil', 'harmonious',
-    'balanced', 'stable', 'reliable', 'trustworthy', 'honest', 'authentic',
-    'genuine', 'real', 'true', 'pure', 'clear', 'transparent', 'open'
-  ],
-  ADP: [
-    'with', 'for', 'to', 'from', 'in', 'on', 'at', 'by', 'through',
-    'across', 'over', 'under', 'above', 'below', 'beside', 'near',
-    'around', 'about', 'concerning', 'regarding', 'regarding', 'toward',
-    'towards', 'into', 'onto', 'upon', 'within', 'without', 'against',
-    'among', 'between', 'during', 'before', 'after', 'since', 'until'
-  ],
-  DET: [
-    'the', 'a', 'an', 'this', 'that', 'these', 'those', 'some', 'any',
-    'all', 'every', 'each', 'no', 'my', 'your', 'his', 'her', 'its',
-    'our', 'their', 'one', 'another', 'other', 'such', 'same', 'different'
-  ]
+import type { POS } from '../types/index.js';
+
+export const wordBank: Record<POS, string[]> = {
+  NOUN: ['time','people','way','day','man','thing','world','life','hand','part','child','eye','woman','place','work','week','case','point','government','company'],
+  VERB: ['make','do','take','see','come','think','look','want','give','use','find','tell','ask','work','seem','feel','try','leave','call'],
+  ADJ: ['good','new','first','last','long','great','little','own','other','old','right','big','high','different','small','large','next','early','young','important'],
+  ADV: ['quickly','slowly','really','very','just','now','then','there','here','always','often','sometimes','together','quietly','boldly'],
+  ADP: ['in','on','at','by','with','about','against','between','into','through','during','before','after','above','below'],
+  DET: ['a','an','the','this','that','these','those','my','your','his','her','its','our','their'],
+  PRON: ['I','you','he','she','it','we','they','me','him','her','us','them'],
+  PROPN: ['Alice','Paris','Google','Saturday','Indiana','Jesus','Cleveland'],
+  AUX: ['is','are','was','were','be','been','being','have','has','had','do','does','did','will','would','can','could','should'],
 };
+
+export default wordBank;
+
+// Legacy export for backward compatibility
+export const WORD_BANK = wordBank;
 
 export function getTemplateById(id: string): Template | undefined {
   return TEMPLATES.find(template => template.id === id);
 }
 
 export function getRandomWordForSlot(slot: string): string {
-  const words = WORD_BANK[slot];
+  const words = wordBank[slot as POS];
   if (!words || words.length === 0) {
     return slot.toLowerCase(); // Fallback to slot name
   }
@@ -118,5 +79,5 @@ export function getRandomWordForSlot(slot: string): string {
 }
 
 export function getWordsForSlot(slot: string): string[] {
-  return WORD_BANK[slot] || [];
+  return wordBank[slot as POS] || [];
 }

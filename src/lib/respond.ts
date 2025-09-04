@@ -193,7 +193,7 @@ export class ResponseEngine {
   private normalizePosTag(pos: string): string {
     const posMap: Record<string, string> = {
       'NOUN': 'NOUN',
-      'PROPN': 'NOUN',
+      'PROPN': 'PROPN', // Keep proper nouns as PROPN
       'VERB': 'VERB',
       'ADJ': 'ADJ',
       'ADV': 'ADV',

@@ -3,10 +3,12 @@
  * Used during word creation to make initial POS guesses
  */
 
+import { testWordInContexts } from './nlp.js';
+
 export interface POSGuess {
   pos: string;
   confidence: 'high' | 'medium' | 'low';
-  source: 'suffix' | 'capitalization' | 'common_word';
+  source: 'suffix' | 'capitalization' | 'common_word' | 'wink';
 }
 
 /**
@@ -60,6 +62,50 @@ export function analyzePotentialPOS(word: string, winkNLPPOS?: string): string[]
   // Deduplicate and return unique POS tags
   const uniquePOS = [...new Set(guesses.map(g => g.pos))];
   return uniquePOS;
+}
+
+/**
+ * Enhanced version that uses context testing to discover all possible POS tags
+ */
+export async function analyzePotentialPOSWithContext(word: string, winkNLPPOS?: string): Promise<string[]> {
+  const results = new Set<string>();
+  
+  // Add the original winkNLP result
+  if (winkNLPPOS) {
+    results.add(normalizePOS(winkNLPPOS));
+  }
+  
+  // Test in different contexts to discover additional POS tags
+  try {
+    const contextTest = await testWordInContexts(word);
+    contextTest.uniquePOS.forEach(pos => {
+      results.add(normalizePOS(pos));
+    });
+  } catch (error) {
+    console.warn(`Context testing failed for word "${word}":`, error);
+    // Fallback to original heuristics if context testing fails
+    const fallbackPOS = analyzePotentialPOS(word, winkNLPPOS);
+    fallbackPOS.forEach(pos => results.add(pos));
+  }
+  
+  // Add suffix-based guesses (existing logic)
+  const suffixGuesses = analyzeSuffixes(word);
+  suffixGuesses.forEach(guess => {
+    results.add(guess.pos);
+  });
+  
+  // Add common word patterns (existing logic)
+  const commonGuesses = analyzeCommonWords(word);
+  commonGuesses.forEach(guess => {
+    results.add(guess.pos);
+  });
+  
+  // Add capitalization-based guesses
+  if (isProperNoun(word)) {
+    results.add('NOUN');
+  }
+  
+  return Array.from(results);
 }
 
 /**
@@ -189,7 +235,7 @@ function analyzeCommonWords(word: string): POSGuess[] {
 function normalizePOS(pos: string): string {
   const posMap: Record<string, string> = {
     'NOUN': 'NOUN',
-    'PROPN': 'NOUN',
+    'PROPN': 'PROPN', // Keep proper nouns as PROPN
     'VERB': 'VERB',
     'ADJ': 'ADJ',
     'ADV': 'ADV',

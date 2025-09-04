@@ -4,6 +4,8 @@ import { surfaceRelatedPhrases } from '../lib/retrieve.js';
 import { createPromptFromPhrase } from '../lib/promptEngine.js';
 import { TEMPLATES } from '../lib/templates.js';
 import GraphViewer from './GraphViewer.jsx';
+import TemplateEditor from './TemplateEditor.jsx';
+import { useActiveNodes } from '../contexts/ActiveNodesContext.js';
 import type { PhraseNode, PhraseChunk } from '../types/index.js';
 
 interface ExploreViewProps {
@@ -15,6 +17,7 @@ interface ExploreViewProps {
 type ExploreTab = 'phrases' | 'graph';
 
 export default function ExploreView({ graph, onGraphUpdate, onError }: ExploreViewProps) {
+  const { contextFrame } = useActiveNodes();
   const [activeTab, setActiveTab] = useState<ExploreTab>('phrases');
   const [selectedPhrase, setSelectedPhrase] = useState<PhraseNode | null>(null);
   const [relatedPhrases, setRelatedPhrases] = useState<any[]>([]);
@@ -23,6 +26,7 @@ export default function ExploreView({ graph, onGraphUpdate, onError }: ExploreVi
   const [isLoading, setIsLoading] = useState(false);
   const [createdPrompt, setCreatedPrompt] = useState<any>(null);
   const [minOverlap, setMinOverlap] = useState<number>(0.1);
+  const [showEditor, setShowEditor] = useState(false);
 
   const phrases = graph.getNodesByType('PHRASE') as PhraseNode[];
 
@@ -96,6 +100,14 @@ export default function ExploreView({ graph, onGraphUpdate, onError }: ExploreVi
         <p className="text-white/80">
           Find related phrases, discover chunks, create prompts, and explore the graph
         </p>
+        <div className="mt-4">
+          <button
+            className="btn-secondary px-6 py-2 rounded-lg text-sm font-medium"
+            onClick={() => setShowEditor(true)}
+          >
+            🛠️ Open Template Editor
+          </button>
+        </div>
       </div>
 
       {/* Tab Navigation */}
@@ -400,6 +412,19 @@ export default function ExploreView({ graph, onGraphUpdate, onError }: ExploreVi
           onGraphUpdate={onGraphUpdate}
           onError={onError}
         />
+      )}
+
+      {/* Template Editor Modal */}
+      {showEditor && (
+        <div className="fixed inset-0 z-50 bg-background/60 backdrop-blur-sm">
+          <div className="absolute inset-0 max-w-5xl mx-auto my-6 bg-background rounded-2xl shadow-xl overflow-hidden">
+            <TemplateEditor 
+              sessionId={contextFrame?.sessionId || 'default'} 
+              onClose={() => setShowEditor(false)}
+              graph={graph}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

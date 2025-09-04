@@ -1,7 +1,10 @@
 export type NodeId = string;
 export type EdgeId = string;
 
-export type NodeType = 'WORD' | 'PHRASE' | 'PROMPT' | 'RESPONSE';
+export type NodeType = 'WORD' | 'PHRASE' | 'PROMPT' | 'RESPONSE' | 'TOPIC' | 'SESSION';
+
+// POS type for template system
+export type POS = 'NOUN' | 'VERB' | 'VERB:participle' | 'VERB:past' | 'VERB:present_3rd' | 'ADJ' | 'ADJ:comparative' | 'ADJ:superlative' | 'ADV' | 'ADP' | 'DET' | 'PRON' | 'PROPN' | 'AUX';
 
 export interface WordNode {
   id: NodeId;
@@ -9,6 +12,8 @@ export interface WordNode {
   text: string;          // raw text
   lemma: string;
   pos: string[];         // canonical POS for the word
+  originalForm?: string;        // original token as it appeared
+  morphFeature?: string;       // morphological feature from winkNLP
   
   // NEW fields for POS polysemy detection
   posPotential: string[];                // possible POS (NOUN/VERB/ADJ/ADV/PROPN/…)
@@ -40,6 +45,7 @@ export interface PhraseNode {
   chunks: PhraseChunk[]; // lightweight sub-phrases (annotations)
   stats?: { uses: number; likes: number };
   derivedFromId?: NodeId; // provenance when promoted from a chunk
+  meta?: Record<string, any>;
 }
 
 export interface PromptSlotBinding {
@@ -69,11 +75,38 @@ export interface ResponseNode {
   rating?: 'like' | 'skip';
 }
 
+export interface TopicNode {
+  id: NodeId;
+  type: 'TOPIC';
+  text: string;                 // canonical premise
+  lemmas: string[];             // content lemmas
+  posPattern?: string;
+  keywords?: string[];          // optional: top 2–3
+  createdAt: number;
+  updatedAt: number;
+  meta?: Record<string, any>;
+}
+
+export interface SessionNode {
+  id: NodeId;
+  type: 'SESSION';
+  topicId: string;
+  startedAt: number;
+  endedAt?: number;
+  entityBindings?: Record<string, { referent: string; kind?: 'person'|'place'|'thing'; aliases?: string[] }>;
+  createdAt: number;
+  updatedAt: number;
+  meta?: Record<string, any>;
+}
+
 export type EdgeType =
   | 'PHRASE_CONTAINS_WORD'   // PHRASE -> WORD
   | 'PROMPT_USES_FILLER'     // PROMPT -> WORD/PHRASE for slot bindings
   | 'RESPONSE_ANSWERS_PROMPT'// RESPONSE -> PROMPT
-  | 'DERIVED_FROM';          // PHRASE(child) -> PHRASE(parent)
+  | 'DERIVED_FROM'           // PHRASE(child) -> PHRASE(parent)
+  | 'PHRASE_ABOUT_TOPIC'     // Phrase|Prompt|Response -> Topic
+  | 'CREATED_IN_SESSION'     // Phrase|Prompt|Response -> Session
+  | 'SESSION_OF_TOPIC';      // Session -> Topic
 
 export interface Edge {
   id: EdgeId;
@@ -84,9 +117,58 @@ export interface Edge {
 }
 
 export interface GraphJSON {
-  nodes: (WordNode | PhraseNode | PromptNode | ResponseNode)[];
+  nodes: (WordNode | PhraseNode | PromptNode | ResponseNode | TopicNode | SessionNode)[];
   edges: Edge[];
   version: number;
 }
 
-export type Node = WordNode | PhraseNode | PromptNode | ResponseNode;
+export type Node = WordNode | PhraseNode | PromptNode | ResponseNode | TopicNode | SessionNode;
+
+// Template system types
+export interface SlotDescriptor {
+  kind?: 'slot' | 'chunk';
+  pos: POS; // For kind==='slot' it is the POS; for kind==='chunk' pos is ignored
+  /** Numbering for per-POS repeated slots, e.g., NOUN1, NOUN2 */
+  index?: number; // 1-based
+  /** For chunk slots, a concrete pattern like "ADJ NOUN ADP NOUN" */
+  chunkPattern?: string;
+}
+
+export interface UserTemplate {
+  id: string;
+  text: string;              // e.g., "[NOUN1 VERB NOUN1]" or "[ADJ NOUN ADP NOUN]"
+  slots: SlotDescriptor[];   // ordered slots
+  source: 'user' | 'phrase' | 'chunk' | 'system';
+  createdInSessionId: string;
+  baseText?: string;         // original phrase text for phrase templates
+  pinned?: boolean;          // user-locked template (hard priority)
+  tags?: string[];
+}
+
+export interface SessionLocks {
+  lockedWordIds?: string[];     // WordNode ids
+  lockedChunkIds?: string[];    // Chunk ids
+  lockedTemplateIds?: string[]; // Template ids
+}
+
+export interface ChunkShape {
+  id: string;
+  pattern: string; // e.g., "ADJ NOUN ADP NOUN"
+  text: string;    // visible sub-phrase text
+  phraseId: string;
+}
+
+// Ephemeral prompt for generation preview / response storage handoff
+export interface EphemeralPrompt {
+  templateId: string;
+  templateSignature: string; // e.g., "ADV-NOUN-NOUN-PRON-NOUN-VERB-NOUN" or chunk pattern
+  text: string;              // rendered prompt text
+  bindings: Array<{
+    slot: SlotDescriptor;
+    nodeId?: string;  // graph node id used
+    bank?: string;    // if filled from word bank
+  }>;
+  randomSeed: string;
+  sourcePhraseIds?: string[];
+  sourceChunkIds?: string[];
+}

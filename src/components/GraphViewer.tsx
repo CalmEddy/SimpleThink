@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { SemanticGraphLite } from '../lib/semanticGraphLite.js';
-import type { Node, Edge, WordNode, PhraseNode, PromptNode, ResponseNode } from '../types/index.js';
+import type { Node, Edge, WordNode, PhraseNode, PromptNode, ResponseNode, TopicNode, SessionNode } from '../types/index.js';
 
 interface GraphViewerProps {
   graph: SemanticGraphLite;
@@ -17,15 +17,19 @@ export default function GraphViewer({ graph, onGraphUpdate, onError }: GraphView
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState<string>('all');
   const [sortBy, setSortBy] = useState<string>('id');
-
-  // Get all nodes and edges
+  // Get all nodes and edges - use node count as dependency to force refresh
+  const nodeCount = graph.getNodeCount();
+  const edgeCount = graph.getEdgeCount();
+  
   const allNodes = useMemo(() => graph.getNodesByType('WORD').concat(
     graph.getNodesByType('PHRASE'),
     graph.getNodesByType('PROMPT'),
-    graph.getNodesByType('RESPONSE')
-  ), [graph]);
+    graph.getNodesByType('RESPONSE'),
+    graph.getNodesByType('TOPIC'),
+    graph.getNodesByType('SESSION')
+  ), [graph, nodeCount]);
 
-  const allEdges = useMemo(() => graph.getEdges(), [graph]);
+  const allEdges = useMemo(() => graph.getEdges(), [graph, edgeCount]);
 
   // Filter and search logic
   const filteredNodes = useMemo(() => {
@@ -58,6 +62,16 @@ export default function GraphViewer({ graph, onGraphUpdate, onError }: GraphView
           const responseNode = node as ResponseNode;
           return responseNode.text.toLowerCase().includes(term) ||
                  responseNode.lemmas.some(l => l.toLowerCase().includes(term));
+        } else if (node.type === 'TOPIC') {
+          const topicNode = node as TopicNode;
+          return topicNode.text.toLowerCase().includes(term) ||
+                 topicNode.lemmas.some(l => l.toLowerCase().includes(term)) ||
+                 (topicNode.keywords && topicNode.keywords.some(k => k.toLowerCase().includes(term)));
+        } else if (node.type === 'SESSION') {
+          const sessionNode = node as SessionNode;
+          return sessionNode.id.toLowerCase().includes(term) ||
+                 sessionNode.topicId.toLowerCase().includes(term) ||
+                 (sessionNode.entityBindings && Object.keys(sessionNode.entityBindings).some(k => k.toLowerCase().includes(term)));
         }
         return false;
       });
@@ -94,12 +108,16 @@ export default function GraphViewer({ graph, onGraphUpdate, onError }: GraphView
         const fromNode = graph.getNodesByType('WORD').concat(
           graph.getNodesByType('PHRASE'),
           graph.getNodesByType('PROMPT'),
-          graph.getNodesByType('RESPONSE')
+          graph.getNodesByType('RESPONSE'),
+          graph.getNodesByType('TOPIC'),
+          graph.getNodesByType('SESSION')
         ).find(n => n.id === edge.from);
         const toNode = graph.getNodesByType('WORD').concat(
           graph.getNodesByType('PHRASE'),
           graph.getNodesByType('PROMPT'),
-          graph.getNodesByType('RESPONSE')
+          graph.getNodesByType('RESPONSE'),
+          graph.getNodesByType('TOPIC'),
+          graph.getNodesByType('SESSION')
         ).find(n => n.id === edge.to);
         
         return edge.type.toLowerCase().includes(term) ||
@@ -205,6 +223,58 @@ export default function GraphViewer({ graph, onGraphUpdate, onError }: GraphView
           </div>
         </div>
       );
+    } else if (node.type === 'TOPIC') {
+      const topicNode = node as TopicNode;
+      return (
+        <div className="space-y-3">
+          <div>
+            <h4 className="font-semibold text-gray-800">Topic Details</h4>
+            <div className="text-sm text-gray-600 mt-1">
+              <div><strong>Text:</strong> {topicNode.text}</div>
+              <div><strong>Lemmas:</strong> {topicNode.lemmas.join(', ')}</div>
+              {topicNode.posPattern && (
+                <div><strong>POS Pattern:</strong> {topicNode.posPattern}</div>
+              )}
+              {topicNode.keywords && topicNode.keywords.length > 0 && (
+                <div><strong>Keywords:</strong> {topicNode.keywords.join(', ')}</div>
+              )}
+              <div><strong>Created:</strong> {new Date(topicNode.createdAt).toLocaleString()}</div>
+              <div><strong>Updated:</strong> {new Date(topicNode.updatedAt).toLocaleString()}</div>
+            </div>
+          </div>
+        </div>
+      );
+    } else if (node.type === 'SESSION') {
+      const sessionNode = node as SessionNode;
+      return (
+        <div className="space-y-3">
+          <div>
+            <h4 className="font-semibold text-gray-800">Session Details</h4>
+            <div className="text-sm text-gray-600 mt-1">
+              <div><strong>Topic ID:</strong> {sessionNode.topicId}</div>
+              <div><strong>Started:</strong> {new Date(sessionNode.startedAt).toLocaleString()}</div>
+              {sessionNode.endedAt && (
+                <div><strong>Ended:</strong> {new Date(sessionNode.endedAt).toLocaleString()}</div>
+              )}
+              {sessionNode.entityBindings && Object.keys(sessionNode.entityBindings).length > 0 && (
+                <div>
+                  <strong>Entity Bindings:</strong>
+                  <div className="ml-4 mt-1">
+                    {Object.entries(sessionNode.entityBindings).map(([key, binding]) => (
+                      <div key={key} className="text-xs">
+                        <strong>{key}:</strong> {binding.referent} ({binding.kind || 'unknown'})
+                        {binding.aliases && binding.aliases.length > 0 && (
+                          <span> - aliases: {binding.aliases.join(', ')}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
     }
     return null;
   };
@@ -236,6 +306,8 @@ export default function GraphViewer({ graph, onGraphUpdate, onError }: GraphView
       PHRASE: graph.getNodesByType('PHRASE').length,
       PROMPT: graph.getNodesByType('PROMPT').length,
       RESPONSE: graph.getNodesByType('RESPONSE').length,
+      TOPIC: graph.getNodesByType('TOPIC').length,
+      SESSION: graph.getNodesByType('SESSION').length,
     };
 
     const edgeCounts = allEdges.reduce((acc, edge) => {
@@ -304,6 +376,8 @@ export default function GraphViewer({ graph, onGraphUpdate, onError }: GraphView
             <option value="PHRASE">Phrases</option>
             <option value="PROMPT">Prompts</option>
             <option value="RESPONSE">Responses</option>
+            <option value="TOPIC">Topics</option>
+            <option value="SESSION">Sessions</option>
           </select>
         </div>
         <div className="flex items-center space-x-2">
@@ -352,6 +426,16 @@ export default function GraphViewer({ graph, onGraphUpdate, onError }: GraphView
                 {node.type === 'PHRASE' && (
                   <div className="text-xs text-gray-500 mt-1">
                     {(node as PhraseNode).posPattern} • {(node as PhraseNode).lemmas.length} lemmas
+                  </div>
+                )}
+                {node.type === 'TOPIC' && (
+                  <div className="text-xs text-gray-500 mt-1">
+                    {(node as TopicNode).lemmas.length} lemmas • {(node as TopicNode).keywords?.length || 0} keywords
+                  </div>
+                )}
+                {node.type === 'SESSION' && (
+                  <div className="text-xs text-gray-500 mt-1">
+                    Topic: {(node as SessionNode).topicId} • {(node as SessionNode).entityBindings ? Object.keys((node as SessionNode).entityBindings!).length : 0} entities
                   </div>
                 )}
                 {'stats' in node && node.stats && (

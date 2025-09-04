@@ -4,6 +4,7 @@ import { persistenceManager } from './lib/persistence.js';
 import IngestView from './components/IngestView.jsx';
 import ExploreView from './components/ExploreView.jsx';
 import PromptView from './components/PromptView.jsx';
+import { ActiveNodesProvider } from './contexts/ActiveNodesContext.jsx';
 
 type ViewType = 'ingest' | 'explore' | 'prompt';
 
@@ -93,42 +94,43 @@ function App() {
   }
 
   return (
-    <div className="thinkcraft-container min-h-screen">
-      {/* Header */}
-      <header className="bg-white/10 backdrop-blur-md border-b border-white/20">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between items-center py-4">
-            <div className="flex items-center space-x-4">
-              <h1 className="text-2xl font-bold text-white">ThinkCraft Lite</h1>
-              <div className="text-sm text-white/80">
-                {graph.getNodeCount()} nodes, {graph.getEdgeCount()} edges
+    <ActiveNodesProvider>
+      <div className="thinkcraft-container min-h-screen">
+        {/* Header */}
+        <header className="bg-white/10 backdrop-blur-md border-b border-white/20">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex justify-between items-center py-4">
+              <div className="flex items-center space-x-4">
+                <h1 className="text-2xl font-bold text-white">ThinkCraft Lite</h1>
+                <div className="text-sm text-white/80">
+                  {graph.getNodeCount()} nodes, {graph.getEdgeCount()} edges
+                </div>
+              </div>
+              
+              <div className="flex items-center space-x-4">
+                <button
+                  onClick={saveGraph}
+                  className="btn-secondary px-4 py-2 rounded-lg text-sm font-medium"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={auditAllWords}
+                  className="btn-secondary px-4 py-2 rounded-lg text-sm font-medium"
+                  title="Audit POS potential for all words"
+                >
+                  Audit Words
+                </button>
+                <button
+                  onClick={clearGraph}
+                  className="btn-secondary px-4 py-2 rounded-lg text-sm font-medium"
+                >
+                  Clear
+                </button>
               </div>
             </div>
-            
-            <div className="flex items-center space-x-4">
-              <button
-                onClick={saveGraph}
-                className="btn-secondary px-4 py-2 rounded-lg text-sm font-medium"
-              >
-                Save
-              </button>
-              <button
-                onClick={auditAllWords}
-                className="btn-secondary px-4 py-2 rounded-lg text-sm font-medium"
-                title="Audit POS potential for all words"
-              >
-                Audit Words
-              </button>
-              <button
-                onClick={clearGraph}
-                className="btn-secondary px-4 py-2 rounded-lg text-sm font-medium"
-              >
-                Clear
-              </button>
-            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
       {/* Navigation */}
       <nav className="bg-white/5 backdrop-blur-sm border-b border-white/10">
@@ -211,7 +213,8 @@ function App() {
           </div>
         </div>
       </footer>
-    </div>
+      </div>
+    </ActiveNodesProvider>
   );
 }
 

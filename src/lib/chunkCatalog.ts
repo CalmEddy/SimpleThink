@@ -1,5 +1,7 @@
 import type { PhraseChunk } from '../types/index.js';
 
+type TokenPOS = { token: string; lemma: string; pos: string };
+
 interface ChunkStats {
   uses: number;
   likes: number;
@@ -127,6 +129,46 @@ export class ChunkCatalog {
       this.catalog.set(key, stats);
     });
   }
+}
+
+// Utility function to merge adjacent PROPN tokens into single name chunks
+export function mergeProperNameRuns(seq: TokenPOS[]): TokenPOS[] {
+  const out: TokenPOS[] = [];
+  let i = 0;
+  while (i < seq.length) {
+    if (seq[i].pos === 'PROPN') {
+      let j = i + 1;
+      let text = seq[i].token;
+      let lemma = seq[i].lemma;
+      while (j < seq.length && seq[j].pos === 'PROPN') {
+        text += ' ' + seq[j].token;
+        lemma += ' ' + seq[j].lemma;
+        j++;
+      }
+      out.push({ token: text, lemma, pos: 'PROPN' });
+      i = j;
+    } else {
+      out.push(seq[i]);
+      i++;
+    }
+  }
+  return out;
+}
+
+// Enhanced chunk building with proper name merging
+export function buildChunks(tokens: string[], lemmas: string[], pos: string[]): PhraseChunk[] {
+  const seq: TokenPOS[] = tokens.map((t, i) => ({ token: t, lemma: lemmas[i], pos: pos[i] }));
+  const merged = mergeProperNameRuns(seq);
+  
+  // Convert back to arrays for existing chunk extraction logic
+  const mergedTokens = merged.map(t => t.token);
+  const mergedLemmas = merged.map(t => t.lemma);
+  const mergedPos = merged.map(t => t.pos);
+  
+  // Now create n-grams & match patterns like:
+  // PROPN-PROPN, NOUN-PROPN, PROPN-NOUN, etc.
+  // This would integrate with your existing extractChunks logic
+  return []; // Placeholder - integrate with existing chunk extraction
 }
 
 // Export singleton instance and convenience functions

@@ -429,3 +429,4 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
     </div>
   );
 }
+

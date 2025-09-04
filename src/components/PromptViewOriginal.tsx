@@ -1,9 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { SemanticGraphLite } from '../lib/semanticGraphLite.js';
 import { recordResponse, promoteResponseToPhrase, rateResponse } from '../lib/respond.js';
-import { generateEphemeralPrompts } from '../lib/promptEngine.js';
-import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext.js';
-import type { PromptNode, ResponseNode, EphemeralPrompt } from '../types/index.js';
+import type { PromptNode, ResponseNode } from '../types/index.js';
 
 interface PromptViewProps {
   graph: SemanticGraphLite;
@@ -11,98 +9,32 @@ interface PromptViewProps {
   onError: (error: string) => void;
 }
 
-export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: PromptViewProps) {
-  const { ctx, contextFrame } = useActiveNodesWithGraph(graph);
+export default function PromptView({ graph, onGraphUpdate, onError }: PromptViewProps) {
   const [selectedPrompt, setSelectedPrompt] = useState<PromptNode | null>(null);
-  const [selectedEphemeralPrompt, setSelectedEphemeralPrompt] = useState<EphemeralPrompt | null>(null);
   const [responseText, setResponseText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [lastResponse, setLastResponse] = useState<ResponseNode | null>(null);
   const [showPromotionModal, setShowPromotionModal] = useState(false);
-  const [ephemeralPrompts, setEphemeralPrompts] = useState<EphemeralPrompt[]>([]);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generationCount, setGenerationCount] = useState(10);
 
   const prompts = graph.getNodesByType('PROMPT') as PromptNode[];
   const responses = graph.getNodesByType('RESPONSE') as ResponseNode[];
 
-  // Generate new prompts when component mounts or context changes
-  useEffect(() => {
-    if (contextFrame?.sessionId && ctx.words.length > 0) {
-      generateNewPrompts();
-    }
-  }, [contextFrame?.sessionId, ctx.words.length]);
-
-  const generateNewPrompts = async () => {
-    if (!contextFrame?.sessionId) return;
-    
-    try {
-      setIsGenerating(true);
-      const newPrompts = generateEphemeralPrompts(
-        graph, 
-        ctx, 
-        contextFrame.sessionId, 
-        generationCount
-      );
-      setEphemeralPrompts(newPrompts);
-    } catch (error) {
-      onError(error instanceof Error ? error.message : 'Failed to generate prompts');
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
   const handlePromptSelect = (prompt: PromptNode) => {
     setSelectedPrompt(prompt);
-    setSelectedEphemeralPrompt(null);
-    setResponseText('');
-    setLastResponse(null);
-  };
-
-  const handleEphemeralPromptSelect = (ephemeralPrompt: EphemeralPrompt) => {
-    setSelectedEphemeralPrompt(ephemeralPrompt);
-    setSelectedPrompt(null);
     setResponseText('');
     setLastResponse(null);
   };
 
   const handleSubmitResponse = async () => {
-    if (!responseText.trim()) {
-      onError('Please enter a response');
+    if (!selectedPrompt || !responseText.trim()) {
+      onError('Please select a prompt and enter a response');
       return;
     }
 
     try {
       setIsSubmitting(true);
-      
-      if (selectedPrompt) {
-        // Responding to existing stored prompt
-        const result = recordResponse(selectedPrompt.id, responseText.trim(), graph);
-        setLastResponse(result.responseNode);
-      } else if (selectedEphemeralPrompt && contextFrame) {
-        // Responding to ephemeral prompt - convert to stored prompt first
-        const promptNode = graph.recordPrompt({
-          text: selectedEphemeralPrompt.text,
-          templateSignature: selectedEphemeralPrompt.templateSignature,
-          bindings: selectedEphemeralPrompt.bindings,
-          randomSeed: selectedEphemeralPrompt.randomSeed,
-          createdBy: 'system',
-          createdAt: Date.now(),
-        });
-
-        // Link to topic/session
-        graph.addEdge(promptNode.id, contextFrame.topicId, 'PROMPT_ABOUT_TOPIC');
-        graph.addEdge(promptNode.id, contextFrame.sessionId, 'CREATED_IN_SESSION');
-
-        // Record response
-        const result = recordResponse(promptNode.id, responseText.trim(), graph);
-        setLastResponse(result.responseNode);
-        
-        // Remove from ephemeral list and add to stored prompts
-        setEphemeralPrompts(prev => prev.filter(p => p !== selectedEphemeralPrompt));
-        setSelectedEphemeralPrompt(null);
-      }
-      
+      const result = recordResponse(selectedPrompt.id, responseText.trim(), graph);
+      setLastResponse(result.responseNode);
       setResponseText('');
       onGraphUpdate();
     } catch (error) {
@@ -134,8 +66,6 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
     return responses.filter(response => response.promptId === promptId);
   };
 
-  const currentPrompt = selectedPrompt || selectedEphemeralPrompt;
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -146,74 +76,13 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
         </p>
       </div>
 
-      {/* Generation Controls */}
-      <div className="card p-6 rounded-lg shadow-lg">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-xl font-semibold text-gray-800">Generate New Prompts</h3>
-          <div className="flex items-center space-x-4">
-            <label className="text-sm text-gray-600">
-              Count:
-              <input
-                type="number"
-                value={generationCount}
-                onChange={(e) => setGenerationCount(Math.max(1, parseInt(e.target.value) || 1))}
-                className="ml-2 w-16 px-2 py-1 border border-gray-300 rounded text-sm"
-                min="1"
-                max="50"
-              />
-            </label>
-            <button
-              onClick={generateNewPrompts}
-              disabled={isGenerating}
-              className="btn-primary px-4 py-2 rounded-lg font-medium disabled:opacity-50"
-            >
-              {isGenerating ? 'Generating...' : 'Generate New'}
-            </button>
-          </div>
-        </div>
-        <div className="text-sm text-gray-600">
-          Generated {ephemeralPrompts.length} prompts from your templates and context
-        </div>
-      </div>
-
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left Column - Prompts */}
         <div className="space-y-6">
-          {/* Generated Ephemeral Prompts */}
+          {/* Available Prompts */}
           <div className="card p-6 rounded-lg shadow-lg">
             <h3 className="text-xl font-semibold text-gray-800 mb-4">
-              Generated Prompts ({ephemeralPrompts.length})
-            </h3>
-            <div className="space-y-3 max-h-96 overflow-y-auto">
-              {ephemeralPrompts.map((prompt, index) => (
-                <div
-                  key={`${prompt.templateId}-${index}`}
-                  className={`prompt-item p-3 rounded-lg cursor-pointer transition-all ${
-                    selectedEphemeralPrompt === prompt ? 'ring-2 ring-blue-500' : ''
-                  }`}
-                  onClick={() => handleEphemeralPromptSelect(prompt)}
-                >
-                  <div className="font-medium text-gray-800">{prompt.text}</div>
-                  <div className="text-sm text-gray-600 mt-1">
-                    Template: {prompt.templateId} • {prompt.bindings.length} bindings
-                  </div>
-                  <div className="text-xs text-gray-500 mt-1">
-                    Signature: {prompt.templateSignature}
-                  </div>
-                </div>
-              ))}
-              {ephemeralPrompts.length === 0 && !isGenerating && (
-                <div className="text-center text-gray-500 py-8">
-                  No generated prompts. Click "Generate New" to create some.
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Stored Prompts */}
-          <div className="card p-6 rounded-lg shadow-lg">
-            <h3 className="text-xl font-semibold text-gray-800 mb-4">
-              Stored Prompts ({prompts.length})
+              Available Prompts ({prompts.length})
             </h3>
             <div className="space-y-3 max-h-96 overflow-y-auto">
               {prompts.map((prompt) => (
@@ -237,19 +106,12 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
           </div>
 
           {/* Response Input */}
-          {currentPrompt && (
+          {selectedPrompt && (
             <div className="card p-6 rounded-lg shadow-lg">
               <h3 className="text-xl font-semibold text-gray-800 mb-4">Respond to Prompt</h3>
               <div className="space-y-4">
                 <div className="bg-yellow-50 p-3 rounded-lg">
-                  <div className="font-medium text-gray-800">
-                    {selectedPrompt ? selectedPrompt.templateText : selectedEphemeralPrompt?.text}
-                  </div>
-                  {selectedEphemeralPrompt && (
-                    <div className="text-sm text-gray-600 mt-1">
-                      Template: {selectedEphemeralPrompt.templateId}
-                    </div>
-                  )}
+                  <div className="font-medium text-gray-800">{selectedPrompt.templateText}</div>
                 </div>
                 
                 <div>
