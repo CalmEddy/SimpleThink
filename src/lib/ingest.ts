@@ -11,6 +11,14 @@ export interface IngestionResult {
   chunksExtracted: number;
 }
 
+export interface BatchIngestionResult {
+  results: IngestionResult[];
+  totalPhrases: number;
+  successfulPhrases: number;
+  failedPhrases: number;
+  errors: string[];
+}
+
 export interface ContextFrame {
   topicId: string;
   sessionId: string;
@@ -28,6 +36,61 @@ export class IngestionPipeline {
       IngestionPipeline.instance = new IngestionPipeline();
     }
     return IngestionPipeline.instance;
+  }
+
+  /**
+   * Split text into phrases using sentence punctuation, returns, and line breaks
+   */
+  splitTextIntoPhrases(text: string): string[] {
+    // First normalize line breaks to \n
+    const normalizedText = text.replace(/\r\n|\r/g, '\n');
+    
+    // Split on sentence-ending punctuation followed by whitespace or end of string
+    // Also split on line breaks
+    const phrases = normalizedText
+      .split(/(?<=[.!?])\s*|\n/)
+      .map(phrase => phrase.trim())
+      .filter(phrase => phrase.length > 0);
+    
+    console.log('🔍 Split text into phrases:', phrases);
+    return phrases;
+  }
+
+  /**
+   * Process multiple phrases in batch
+   */
+  async ingestBatchPhrases(text: string, graph: SemanticGraphLite, contextFrame?: ContextFrame): Promise<BatchIngestionResult> {
+    const phrases = this.splitTextIntoPhrases(text);
+    const results: IngestionResult[] = [];
+    const errors: string[] = [];
+    
+    console.log(`🔄 Processing ${phrases.length} phrases in batch`);
+    
+    for (let i = 0; i < phrases.length; i++) {
+      const phrase = phrases[i];
+      try {
+        console.log(`📝 Processing phrase ${i + 1}/${phrases.length}: "${phrase}"`);
+        const result = await this.ingestPhraseText(phrase, graph, contextFrame);
+        results.push(result);
+      } catch (error) {
+        const errorMessage = `Failed to process phrase "${phrase}": ${error instanceof Error ? error.message : 'Unknown error'}`;
+        console.warn(`❌ ${errorMessage}`);
+        errors.push(errorMessage);
+      }
+    }
+    
+    const successfulPhrases = results.length;
+    const failedPhrases = phrases.length - successfulPhrases;
+    
+    console.log(`✅ Batch processing complete: ${successfulPhrases} successful, ${failedPhrases} failed`);
+    
+    return {
+      results,
+      totalPhrases: phrases.length,
+      successfulPhrases,
+      failedPhrases,
+      errors
+    };
   }
 
   async ingestPhraseText(text: string, graph: SemanticGraphLite, contextFrame?: ContextFrame): Promise<IngestionResult> {
@@ -257,3 +320,9 @@ export const ingestPhraseText = async (text: string, graph: SemanticGraphLite, c
 
 export const promoteChunk = async (parentPhraseId: string, chunkId: string, graph: SemanticGraphLite): Promise<PhraseNode | null> => 
   ingestionPipeline.promoteChunk(parentPhraseId, chunkId, graph);
+
+export const splitTextIntoPhrases = (text: string): string[] => 
+  ingestionPipeline.splitTextIntoPhrases(text);
+
+export const ingestBatchPhrases = async (text: string, graph: SemanticGraphLite, contextFrame?: ContextFrame): Promise<BatchIngestionResult> => 
+  ingestionPipeline.ingestBatchPhrases(text, graph, contextFrame);

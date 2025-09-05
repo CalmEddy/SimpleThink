@@ -148,10 +148,16 @@ export const ActiveNodesProvider: React.FC<ActiveNodesProviderProps> = ({ childr
     const allWords = graph.getNodesByType('WORD') as WordNode[];
     const words = allWords.filter(word => wordIds.has(word.id));
 
-    // Extract chunks from contextual phrases
+    // Extract chunks from contextual phrases (ensure uniqueness by ID)
     const chunks: PhraseChunk[] = [];
+    const chunkIds = new Set<string>();
     phrases.forEach(phrase => {
-      chunks.push(...phrase.chunks);
+      phrase.chunks.forEach(chunk => {
+        if (!chunkIds.has(chunk.id)) {
+          chunkIds.add(chunk.id);
+          chunks.push(chunk);
+        }
+      });
     });
 
     // Extract unique POS patterns from contextual phrases

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { SemanticGraphLite } from '../lib/semanticGraphLite.js';
-import { ingestPhraseText, promoteChunk } from '../lib/ingest.js';
+import { ingestPhraseText, promoteChunk, ingestBatchPhrases, splitTextIntoPhrases, type BatchIngestionResult } from '../lib/ingest.js';
 import type { PhraseNode, PhraseChunk, WordNode } from '../types/index.js';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext.jsx';
 import TopicChip from './TopicChip.jsx';
@@ -19,6 +19,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
     wordsCreated: number;
     chunksExtracted: number;
   } | null>(null);
+  const [lastBatchResult, setLastBatchResult] = useState<BatchIngestionResult | null>(null);
   const [selectedChunk, setSelectedChunk] = useState<PhraseChunk | null>(null);
   const [expandedSections, setExpandedSections] = useState<{
     phrases: boolean;
@@ -58,27 +59,25 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
       // Get all POS tags from the word
       const allPOS = word.pos || [];
       
-      // Add to Multi-POS column if word has multiple POS tags
+      // If word has multiple POS tags, only add to Multi-POS column
       if (allPOS.length > 1) {
         organized.multiPOS.push(word);
-      }
-      
-      // Add to individual POS columns based on what POS tags the word has
-      if (allPOS.includes('NOUN')) {
-        organized.nouns.push(word);
-      }
-      if (allPOS.includes('VERB')) {
-        organized.verbs.push(word);
-      }
-      if (allPOS.includes('ADJ')) {
-        organized.adjectives.push(word);
-      }
-      if (allPOS.includes('ADV')) {
-        organized.adverbs.push(word);
-      }
-      
-      // If word has no POS tags or unknown POS, put in Multi-POS as fallback
-      if (allPOS.length === 0 || !allPOS.some(pos => ['NOUN', 'VERB', 'ADJ', 'ADV'].includes(pos))) {
+      } else if (allPOS.length === 1) {
+        // Single POS tag - add to appropriate column
+        if (allPOS.includes('NOUN')) {
+          organized.nouns.push(word);
+        } else if (allPOS.includes('VERB')) {
+          organized.verbs.push(word);
+        } else if (allPOS.includes('ADJ')) {
+          organized.adjectives.push(word);
+        } else if (allPOS.includes('ADV')) {
+          organized.adverbs.push(word);
+        } else {
+          // Unknown single POS tag
+          organized.multiPOS.push(word);
+        }
+      } else {
+        // No POS tags - put in Multi-POS as fallback
         organized.multiPOS.push(word);
       }
     });
@@ -128,8 +127,20 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
         sessionId: contextFrame.sessionId,
       } : undefined;
       
-      const result = await ingestPhraseText(inputText.trim(), graph, ingestContextFrame);
-      setLastResult(result);
+      console.log('🔍 Processing mode: BATCH (default)');
+      console.log('🔍 Input text:', inputText);
+      
+      // Always use batch processing
+      console.log('🔄 Starting batch processing...');
+      const batchResult = await ingestBatchPhrases(inputText.trim(), graph, ingestContextFrame);
+      setLastBatchResult(batchResult);
+      setLastResult(null); // Clear single result
+      console.log(`✅ Batch processing complete: ${batchResult.successfulPhrases}/${batchResult.totalPhrases} phrases processed successfully`);
+      
+      if (batchResult.errors.length > 0) {
+        console.warn('⚠️ Some phrases failed to process:', batchResult.errors);
+      }
+      
       setInputText('');
       triggerGraphUpdate(); // Use the new function that triggers real-time updates
     } catch (error) {
@@ -163,7 +174,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
       <div className="text-center">
         <h2 className="text-3xl font-bold text-white mb-2">Ingest Phrases</h2>
         <p className="text-white/80 mb-4">
-          Add phrases to extract words, analyze patterns, and discover chunks
+          Add multiple phrases to extract words, analyze patterns, and discover chunks. Text is automatically split by sentences and line breaks.
         </p>
         <TopicChip graph={graph} />
       </div>
@@ -173,18 +184,36 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
         <div className="space-y-4">
           <div>
             <label htmlFor="phrase-input" className="block text-sm font-medium text-gray-700 mb-2">
-              Enter a phrase or sentence:
+              Enter text with multiple phrases (separated by sentences, line breaks):
             </label>
-            <textarea
-              id="phrase-input"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="e.g., 'The quick brown fox jumps over the lazy dog'"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              rows={3}
-              disabled={isProcessing}
-            />
+            <div className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded inline-block mb-2">
+              Multiple phrases will be processed separately
+            </div>
           </div>
+          
+          <textarea
+            id="phrase-input"
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            placeholder="e.g., 'The quick brown fox jumps over the lazy dog. The cat sat on the mat. Birds fly in the sky.'"
+            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            rows={6}
+            disabled={isProcessing}
+          />
+          
+          {/* Preview phrases */}
+          {inputText.trim() && (
+            <div className="mt-3 p-3 bg-gray-50 rounded-lg">
+              <div className="text-sm font-medium text-gray-700 mb-2">Preview - Phrases to be processed:</div>
+              <div className="space-y-1">
+                {splitTextIntoPhrases(inputText).map((phrase, index) => (
+                  <div key={index} className="text-sm text-gray-600 bg-white p-2 rounded border">
+                    {index + 1}. "{phrase}"
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           
           <div className="flex space-x-3">
             <button
@@ -195,10 +224,10 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
               {isProcessing ? (
                 <div className="flex items-center space-x-2">
                   <div className="spinner"></div>
-                  <span>Processing...</span>
+                  <span>Processing Phrases...</span>
                 </div>
               ) : (
-                'Ingest Phrase'
+                'Ingest Phrases'
               )}
             </button>
             
@@ -304,7 +333,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {lastResult.phrase.chunks.map((chunk) => (
                     <div
-                      key={chunk.id}
+                      key={`lastResult-${chunk.id}`}
                       className="chunk-item p-3 rounded-lg cursor-pointer"
                       onClick={() => setSelectedChunk(chunk)}
                     >
@@ -326,6 +355,75 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Last Batch Result */}
+      {lastBatchResult && (
+        <div className="card p-6 rounded-lg shadow-lg slide-in">
+          <h3 className="text-xl font-semibold text-gray-800 mb-4">Batch Processing Results</h3>
+          
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            <div className="bg-blue-50 p-4 rounded-lg">
+              <div className="text-sm text-blue-600 font-medium">Total Phrases</div>
+              <div className="text-lg font-semibold text-blue-800">{lastBatchResult.totalPhrases}</div>
+            </div>
+            <div className="bg-green-50 p-4 rounded-lg">
+              <div className="text-sm text-green-600 font-medium">Successful</div>
+              <div className="text-lg font-semibold text-green-800">{lastBatchResult.successfulPhrases}</div>
+            </div>
+            <div className="bg-red-50 p-4 rounded-lg">
+              <div className="text-sm text-red-600 font-medium">Failed</div>
+              <div className="text-lg font-semibold text-red-800">{lastBatchResult.failedPhrases}</div>
+            </div>
+            <div className="bg-purple-50 p-4 rounded-lg">
+              <div className="text-sm text-purple-600 font-medium">Total Chunks</div>
+              <div className="text-lg font-semibold text-purple-800">
+                {lastBatchResult.results.reduce((sum, result) => sum + result.chunksExtracted, 0)}
+              </div>
+            </div>
+          </div>
+
+          {/* Show errors if any */}
+          {lastBatchResult.errors.length > 0 && (
+            <div className="mb-6">
+              <h4 className="text-lg font-medium text-red-700 mb-2">Errors:</h4>
+              <div className="space-y-2">
+                {lastBatchResult.errors.map((error, index) => (
+                  <div key={index} className="bg-red-50 border border-red-200 rounded p-3">
+                    <div className="text-sm text-red-800">{error}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Show successful results */}
+          {lastBatchResult.results.length > 0 && (
+            <div>
+              <h4 className="text-lg font-medium text-gray-700 mb-4">Successfully Processed Phrases:</h4>
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {lastBatchResult.results.map((result, index) => (
+                  <div key={index} className="bg-gray-50 p-4 rounded-lg">
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="font-medium text-gray-800">{result.phrase.text}</div>
+                      <div className="text-sm text-gray-500">
+                        {result.wordsCreated} words • {result.chunksExtracted} chunks
+                      </div>
+                    </div>
+                    <div className="text-sm text-gray-600">
+                      <span className="bg-gray-200 px-2 py-1 rounded text-xs mr-2">
+                        {result.phrase.posPattern}
+                      </span>
+                      <span className="text-xs">
+                        {result.phrase.lemmas.join(', ')}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -428,7 +526,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                 <div className="flex flex-wrap gap-2">
                   {ctx.chunks.map((chunk) => (
                     <div
-                      key={chunk.id}
+                      key={`ctx-${chunk.id}`}
                       className="bg-blue-100 text-blue-800 px-3 py-2 rounded-full text-sm font-medium"
                     >
                       {chunk.text}
@@ -470,7 +568,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                     <h4 className="font-semibold text-gray-700 mb-2">Nouns ({organizedWords.nouns.length})</h4>
                     <div className="space-y-1">
                       {organizedWords.nouns.map((word) => (
-                        <div key={word.id} className="text-sm bg-green-50 p-2 rounded">
+                        <div key={`nouns-${word.id}`} className="text-sm bg-green-50 p-2 rounded">
                           {word.text}
                         </div>
                       ))}
@@ -482,7 +580,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                     <h4 className="font-semibold text-gray-700 mb-2">Verbs ({organizedWords.verbs.length})</h4>
                     <div className="space-y-1">
                       {organizedWords.verbs.map((word) => (
-                        <div key={word.id} className="text-sm bg-red-50 p-2 rounded">
+                        <div key={`verbs-${word.id}`} className="text-sm bg-red-50 p-2 rounded">
                           {word.text}
                         </div>
                       ))}
@@ -494,7 +592,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                     <h4 className="font-semibold text-gray-700 mb-2">Adjectives ({organizedWords.adjectives.length})</h4>
                     <div className="space-y-1">
                       {organizedWords.adjectives.map((word) => (
-                        <div key={word.id} className="text-sm bg-yellow-50 p-2 rounded">
+                        <div key={`adjectives-${word.id}`} className="text-sm bg-yellow-50 p-2 rounded">
                           {word.text}
                         </div>
                       ))}
@@ -506,7 +604,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                     <h4 className="font-semibold text-gray-700 mb-2">Adverbs ({organizedWords.adverbs.length})</h4>
                     <div className="space-y-1">
                       {organizedWords.adverbs.map((word) => (
-                        <div key={word.id} className="text-sm bg-purple-50 p-2 rounded">
+                        <div key={`adverbs-${word.id}`} className="text-sm bg-purple-50 p-2 rounded">
                           {word.text}
                         </div>
                       ))}
@@ -518,7 +616,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                     <h4 className="font-semibold text-gray-700 mb-2">Multi-POS ({organizedWords.multiPOS.length})</h4>
                     <div className="space-y-1">
                       {organizedWords.multiPOS.map((word) => (
-                        <div key={word.id} className="text-sm bg-orange-50 p-2 rounded">
+                        <div key={`multiPOS-${word.id}`} className="text-sm bg-orange-50 p-2 rounded">
                           {word.text}
                           <div className="text-xs text-gray-500">
                             {word.pos?.join(', ')}

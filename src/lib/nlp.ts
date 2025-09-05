@@ -598,8 +598,11 @@ export class NLPAnalyzer {
     const chunkPos = pos.slice(start, end + 1);
     const posPattern = this.inferPosPattern(chunkPos);
     
+    // Generate unique ID by including timestamp and random component to avoid duplicates
+    const uniqueId = `${type}:${start}:${end}:${Date.now()}:${Math.random().toString(36).substr(2, 9)}`;
+    
     return {
-      id: `${type}:${start}:${end}`,
+      id: uniqueId,
       text: chunkLemmas.join(' '),
       lemmas: chunkLemmas,
       posPattern,
