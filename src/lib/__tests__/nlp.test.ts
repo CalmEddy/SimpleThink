@@ -104,4 +104,35 @@ describe('NLP Analyzer', () => {
     expect(result.pos[brewsIndex]).toBe('VERB');
     expect(result.pos[firstIndex]).toBe('ADJ');
   });
+
+  it('should correctly identify multi-word proper nouns (Mother Nature)', async () => {
+    const result = await nlpAnalyzer.analyzeText("Lemons are Mother Nature's whoopee cushions — funny, but inconvenient.");
+    
+    const motherIndex = result.tokens.indexOf('Mother');
+    const natureIndex = result.tokens.indexOf('Nature');
+    const possessiveIndex = result.tokens.indexOf("'s");
+    
+    expect(motherIndex).toBeGreaterThanOrEqual(0);
+    expect(natureIndex).toBeGreaterThanOrEqual(0);
+    expect(possessiveIndex).toBeGreaterThanOrEqual(0);
+    
+    // Mother and Nature should be tagged as PROPN
+    expect(result.pos[motherIndex]).toBe('PROPN');
+    expect(result.pos[natureIndex]).toBe('PROPN');
+    expect(result.pos[possessiveIndex]).toBe('PART');
+  });
+
+  it('should correctly identify multi-word proper nouns (Andrew Jackson)', async () => {
+    const result = await nlpAnalyzer.analyzeText("Lemons made Andrew Jackson sit up and take notice.");
+    
+    const andrewIndex = result.tokens.indexOf('Andrew');
+    const jacksonIndex = result.tokens.indexOf('Jackson');
+    
+    expect(andrewIndex).toBeGreaterThanOrEqual(0);
+    expect(jacksonIndex).toBeGreaterThanOrEqual(0);
+    
+    // Andrew and Jackson should be tagged as PROPN
+    expect(result.pos[andrewIndex]).toBe('PROPN');
+    expect(result.pos[jacksonIndex]).toBe('PROPN');
+  });
 });

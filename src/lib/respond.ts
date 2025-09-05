@@ -2,6 +2,9 @@ import type { SemanticGraphLite } from './semanticGraphLite.js';
 import type { ResponseNode, PhraseNode } from '../types/index.js';
 import { analyzeText } from './nlp.js';
 import { promoteChunk } from './ingest.js';
+import { generatePosPattern, processPropnSpans } from './posNormalization.js';
+import { isStopWord } from './stopWords.js';
+import { analyzePotentialPOS, analyzePotentialPOSWithContext, getPOSGuessSources } from './posHeuristics.js';
 
 export interface ResponseResult {
   responseNode: ResponseNode;
@@ -31,26 +34,50 @@ export class ResponseEngine {
     rating?: 'like' | 'skip'
   ): Promise<ResponseResult> {
     // Analyze the response text
-    const { tokens, lemmas, pos } = await analyzeText(text);
+    const { tokens, lemmas, pos, morphFeatures } = await analyzeText(text);
     
     if (tokens.length === 0) {
       throw new Error('No tokens found in response text');
     }
 
-    // Create/update WORD nodes for the response
-    const wordIds: string[] = [];
+    // Use centralized PROPN span processing
     const wordMap = new Map<string, string>(); // lemma -> wordId
     
-    lemmas.forEach((lemma, index) => {
-      if (!wordMap.has(lemma)) {
-        const word = graph.upsertWord(tokens[index], lemma, [pos[index]]);
-        wordMap.set(lemma, word.id);
+    const processWordCallback = (token: string, lemma: string, pos: string, morphFeature?: string): string => {
+      const normalizedLemma = lemma ? lemma.toLowerCase() : token.toLowerCase();
+      
+      if (!wordMap.has(normalizedLemma)) {
+        // Use basic POS analysis for synchronous processing
+        const potentialPOS = analyzePotentialPOS(normalizedLemma, pos);
+        const sources = getPOSGuessSources(normalizedLemma, pos);
+        
+        // Create word with normalized lemma as both text and lemma
+        const word = graph.upsertWord(normalizedLemma, normalizedLemma, potentialPOS, morphFeature || pos);
+        
+        // Update the word with POS potential sources if it's a new word
+        if (word.posPotentialSource?.includes('initial')) {
+          word.posPotentialSource = sources;
+        }
+        
+        wordMap.set(normalizedLemma, word.id);
+      } else {
+        // Update existing word with current POS observation
+        graph.upsertWord(normalizedLemma, normalizedLemma, [], morphFeature || pos);
       }
-      wordIds.push(wordMap.get(lemma)!);
-    });
+      
+      return wordMap.get(normalizedLemma)!;
+    };
+
+    const { wordIds } = processPropnSpans(
+      tokens,
+      lemmas,
+      pos,
+      morphFeatures,
+      processWordCallback
+    );
 
     // Compute POS pattern
-    const posPattern = this.inferPosPattern(pos);
+    const posPattern = generatePosPattern(pos);
 
     // Create response node
     const responseNode = graph.recordResponse(
@@ -205,6 +232,8 @@ export class ResponseEngine {
       'NUM': 'NUM',
       'PUNCT': 'PUNCT',
       'SYM': 'SYM',
+      'CCONJ': 'CCONJ', // Coordinating conjunctions (and, but, or)
+      'SCONJ': 'SCONJ', // Subordinating conjunctions (because, although, if)
       'X': 'X',
     };
     

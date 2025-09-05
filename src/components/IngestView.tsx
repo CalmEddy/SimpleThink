@@ -59,27 +59,34 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
       // Get all POS tags from the word
       const allPOS = word.pos || [];
       
-      // If word has multiple POS tags, only add to Multi-POS column
+      // Add to Multi-POS column if word has multiple POS tags
       if (allPOS.length > 1) {
         organized.multiPOS.push(word);
-      } else if (allPOS.length === 1) {
-        // Single POS tag - add to appropriate column
-        if (allPOS.includes('NOUN')) {
-          organized.nouns.push(word);
-        } else if (allPOS.includes('VERB')) {
-          organized.verbs.push(word);
-        } else if (allPOS.includes('ADJ')) {
-          organized.adjectives.push(word);
-        } else if (allPOS.includes('ADV')) {
-          organized.adverbs.push(word);
-        } else {
-          // Unknown single POS tag
-          organized.multiPOS.push(word);
-        }
-      } else {
-        // No POS tags - put in Multi-POS as fallback
+      }
+      
+      // Add to individual POS columns based on what POS tags the word has
+      if (allPOS.includes('NOUN')) {
+        organized.nouns.push(word);
+      }
+      if (allPOS.includes('VERB')) {
+        organized.verbs.push(word);
+      }
+      if (allPOS.includes('ADJ')) {
+        organized.adjectives.push(word);
+      }
+      if (allPOS.includes('ADV')) {
+        organized.adverbs.push(word);
+      }
+      
+      // If word has no POS tags or unknown POS, put in Multi-POS as fallback
+      if (allPOS.length === 0 || !allPOS.some(pos => ['NOUN', 'VERB', 'ADJ', 'ADV'].includes(pos))) {
         organized.multiPOS.push(word);
       }
+    });
+
+    // Sort all arrays alphabetically by word text
+    Object.keys(organized).forEach(key => {
+      organized[key as keyof typeof organized].sort((a, b) => a.text.localeCompare(b.text));
     });
 
     return organized;
@@ -563,30 +570,6 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
             <div className="mt-4">
               {ctx.words.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-                  {/* Nouns Column */}
-                  <div>
-                    <h4 className="font-semibold text-gray-700 mb-2">Nouns ({organizedWords.nouns.length})</h4>
-                    <div className="space-y-1">
-                      {organizedWords.nouns.map((word) => (
-                        <div key={`nouns-${word.id}`} className="text-sm bg-green-50 p-2 rounded">
-                          {word.text}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Verbs Column */}
-                  <div>
-                    <h4 className="font-semibold text-gray-700 mb-2">Verbs ({organizedWords.verbs.length})</h4>
-                    <div className="space-y-1">
-                      {organizedWords.verbs.map((word) => (
-                        <div key={`verbs-${word.id}`} className="text-sm bg-red-50 p-2 rounded">
-                          {word.text}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
                   {/* Adjectives Column */}
                   <div>
                     <h4 className="font-semibold text-gray-700 mb-2">Adjectives ({organizedWords.adjectives.length})</h4>
@@ -621,6 +604,30 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                           <div className="text-xs text-gray-500">
                             {word.pos?.join(', ')}
                           </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Nouns Column */}
+                  <div>
+                    <h4 className="font-semibold text-gray-700 mb-2">Nouns ({organizedWords.nouns.length})</h4>
+                    <div className="space-y-1">
+                      {organizedWords.nouns.map((word) => (
+                        <div key={`nouns-${word.id}`} className="text-sm bg-green-50 p-2 rounded">
+                          {word.text}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Verbs Column */}
+                  <div>
+                    <h4 className="font-semibold text-gray-700 mb-2">Verbs ({organizedWords.verbs.length})</h4>
+                    <div className="space-y-1">
+                      {organizedWords.verbs.map((word) => (
+                        <div key={`verbs-${word.id}`} className="text-sm bg-red-50 p-2 rounded">
+                          {word.text}
                         </div>
                       ))}
                     </div>

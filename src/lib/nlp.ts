@@ -1,5 +1,6 @@
 import winkNLP from 'wink-nlp';
 import type { PhraseChunk } from '../types/index.js';
+import { normalizePosTag, generatePosPattern } from './posNormalization.js';
 
 // Initialize winkNLP with error handling
 let nlp: any = null;
@@ -93,7 +94,7 @@ const isPunctuationToken = (t: any): boolean => {
   return isPunctValue(v);
 };
 
-const isCapitalizedWord = (raw: string): boolean => {
+const isCapitalizedWordRaw = (raw: string): boolean => {
   return /^[A-Z][a-zA-Z']*$/.test(raw); // supports "Lincoln's" sans trailing apostrophe-s
 };
 
@@ -108,9 +109,27 @@ const isPunctValue = (v: string): boolean => {
   return /^[^\w\s]+$/.test(v);
 };
 
-const isTokenCapitalizedOrAcronym = (v: string): boolean => {
-  // Handles "Andrew", "Jackson", "NASA", "U.S." (tokenized as separate pieces)
-  return /^[A-Z][a-zA-Z']*$/.test(v) || /^[A-Z]{2,}$/.test(v);
+// Replace with stricter helpers
+// Capitalized "word-like" token (Unicode-aware; allows O'Neil, McDonald, etc.)
+const isCapitalizedWord = (v: string): boolean => {
+  // Starts with an uppercase letter, then one or more letters; allows internal apostrophes/hyphens.
+  return /^[\p{Lu}][\p{L}]+(?:[''\-][\p{L}]+)*$/u.test(v);
+};
+const isAllCapsAcronym = (v: string): boolean => /^[A-Z]{2,}$/.test(v);
+const isAlphaLike = (v: string): boolean => /[A-Za-z]/.test(v);
+
+// possessive token such as "'s" or "'s"
+const isPossessivePart = (v: string): boolean => v === "'s" || v === "'s";
+
+// Heuristic: a sentence looks like Title Case if >50% alpha tokens are capitalized words
+const isTitleCaseSentence = (tokens: Array<{ value: string }>): boolean => {
+  let alpha = 0, caps = 0;
+  for (const t of tokens) {
+    if (!isAlphaLike(t.value)) continue;
+    alpha++;
+    if (isCapitalizedWord(t.value)) caps++;
+  }
+  return alpha > 0 && (caps / alpha) > 0.5;
 };
 
 const NAME_LIKE_TYPES = new Set([
@@ -269,28 +288,81 @@ export class NLPAnalyzer {
         });
       });
     } else {
-      // NER-lite: upgrade consecutive CAPITALIZED tokens & all-caps acronyms
-      const details = doc.tokens().out(I.detail) as Array<{ value: string; pos: string; index: number }>;
-      let runStart = -1;
-      for (let i = 0; i < details.length; i++) {
-        const d = details[i];
-        if (isTokenCapitalizedOrAcronym(d.value) && !isPunctValue(d.value)) {
-          if (runStart === -1) runStart = i;
-        } else {
-          if (runStart !== -1 && i - runStart >= 1) {
-            for (let j = runStart; j < i; j++) {
-              const aIdx = docIdxToArrIdx.get(details[j].index);
-              if (aIdx != null && pos[aIdx] === 'NOUN') pos[aIdx] = 'PROPN';
+      // NER-lite (stricter): runs of ≥2 Capitalized words within same sentence.
+      // Allow a trailing possessive PART ('s). Also allow ALL-CAPS acronyms.
+      const tokenDetails = doc.tokens().out(I.detail) as Array<{
+        value: string; pos: string; index: number; sentenceId?: number
+      }>;
+      const sentences = new Map<number, Array<{ value: string; pos: string; index: number }>>();
+      for (const td of tokenDetails) {
+        const sid = (td as any).sentenceId ?? 0; // if sentenceId not provided, treat all as one
+        if (!sentences.has(sid)) sentences.set(sid, []);
+        sentences.get(sid)!.push(td);
+      }
+
+      // Track which array positions we upgrade by fallback so we can optionally demote later
+      const upgradedByFallback = new Set<number>();
+
+      for (const [, sentTokens] of sentences) {
+        if (isTitleCaseSentence(sentTokens)) continue;
+
+        // 1) Only upgrade runs of 2+ capitalized words (multi-word entities).
+        // NOTE: do NOT include a trailing PART ('s) in the run.
+        let s = -1;
+        const flushRun = (e: number) => {
+          const len = e - s;
+          if (s !== -1 && len >= 2) {
+            for (let k = s; k < e; k++) {
+              const aIdx = docIdxToArrIdx.get(sentTokens[k].index);
+              if (aIdx != null && (pos[aIdx] === 'NOUN' || pos[aIdx] === 'X' || pos[aIdx] === 'UNKNOWN')) {
+                pos[aIdx] = 'PROPN';       // upgrade both tokens (e.g., Mother, Nature)
+                upgradedByFallback.add(aIdx);
+              }
             }
           }
-          runStart = -1;
+        };
+        for (let i = 0; i < sentTokens.length; i++) {
+          const t = sentTokens[i];
+          if (!isPunctValue(t.value) && isCapitalizedWord(t.value)) {
+            if (s === -1) s = i;
+            continue;
+          }
+          // If we're in a run and see a possessive PART ("'s"/"'s"), allow it and keep the run open.
+          if (s !== -1 && isPossessivePart(t.value)) {
+            continue; // don't close the run
+          }
+          // Anything else ends the run
+          flushRun(i);
+          s = -1;
+        }
+        flushRun(sentTokens.length);
+
+        // 2) Single-token ALL-CAPS acronyms (≥2 letters)
+        for (let i = 0; i < sentTokens.length; i++) {
+          const t = sentTokens[i];
+          if (isAllCapsAcronym(t.value)) {
+            const aIdx = docIdxToArrIdx.get(t.index);
+            if (aIdx != null && (pos[aIdx] === 'NOUN' || pos[aIdx] === 'X' || pos[aIdx] === 'UNKNOWN')) {
+              pos[aIdx] = 'PROPN';
+              upgradedByFallback.add(aIdx);
+            }
+          }
         }
       }
-      // tail
-      if (runStart !== -1) {
-        for (let j = runStart; j < details.length; j++) {
-          const aIdx = docIdxToArrIdx.get(details[j].index);
-          if (aIdx != null && pos[aIdx] === 'NOUN') pos[aIdx] = 'PROPN';
+
+      // Demotion pass (unchanged except guard):
+      // If PROPN set only by fallback and not an acronym, demote to NOUN
+      for (let i = 0; i < pos.length; i++) {
+        if (pos[i] !== 'PROPN') continue;
+        if (!upgradedByFallback.has(i)) continue;
+        const orig = tokens[i] ?? '';
+        const looksAcronym = isAllCapsAcronym(orig);
+        if (!looksAcronym) {
+          const lemma = lemmas[i] ?? tokens[i] ?? '';
+          const surface = tokens[i] ?? '';
+          if (lemma.toLowerCase() === surface.toLowerCase()) {
+            pos[i] = 'NOUN';
+          }
         }
       }
     }
@@ -299,16 +371,12 @@ export class NLPAnalyzer {
   }
 
   inferPosPattern(pos: string[]): string {
-    // Convert to compact pattern format
-    const pattern = pos
-      .map(p => this.normalizePosTag(p))
-      .join('-');
-    
-    return pattern;
+    // Use centralized POS pattern generation
+    return generatePosPattern(pos);
   }
 
   extractChunks(lemmas: string[], pos: string[]): PhraseChunk[] {
-    const normalizedPos = pos.map(p => this.normalizePosTag(p));
+    const normalizedPos = pos.map(p => normalizePosTag(p));
     
     // Extract only meaningful patterns
     const chunks = this.extractMeaningfulChunks(lemmas, normalizedPos);
@@ -386,27 +454,6 @@ export class NLPAnalyzer {
     return word.replace(/[^\w]/g, '').toLowerCase();
   }
 
-  private normalizePosTag(pos: string): string {
-    // Map winkNLP POS tags to our canonical format
-    const posMap: Record<string, string> = {
-      'NOUN': 'NOUN',
-      'PROPN': 'PROPN', // Keep proper nouns as PROPN
-      'VERB': 'VERB',
-      'ADJ': 'ADJ',
-      'ADV': 'ADV',
-      'ADP': 'ADP', // Preposition
-      'DET': 'DET', // Determiner
-      'AUX': 'AUX', // Auxiliary verb
-      'PART': 'PART', // Particle
-      'PRON': 'PRON', // Pronoun
-      'NUM': 'NUM', // Number
-      'PUNCT': 'PUNCT', // Punctuation
-      'SYM': 'SYM', // Symbol
-      'X': 'X', // Other
-    };
-    
-    return posMap[pos] || 'X';
-  }
 
   private extractNounPhrases(lemmas: string[], pos: string[]): PhraseChunk[] {
     const chunks: PhraseChunk[] = [];
@@ -596,7 +643,7 @@ export class NLPAnalyzer {
     
     const chunkLemmas = lemmas.slice(start, end + 1);
     const chunkPos = pos.slice(start, end + 1);
-    const posPattern = this.inferPosPattern(chunkPos);
+    const posPattern = generatePosPattern(chunkPos);
     
     // Generate unique ID by including timestamp and random component to avoid duplicates
     const uniqueId = `${type}:${start}:${end}:${Date.now()}:${Math.random().toString(36).substr(2, 9)}`;

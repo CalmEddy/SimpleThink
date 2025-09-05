@@ -4,6 +4,7 @@ import { analyzeText, extractChunks } from './nlp.js';
 import { recordChunks } from './chunkCatalog.js';
 import { analyzePotentialPOS, analyzePotentialPOSWithContext, getPOSGuessSources } from './posHeuristics.js';
 import { isStopWord, getStopWordRatio } from './stopWords.js';
+import { generatePosPattern, processPropnSpans } from './posNormalization.js';
 
 export interface IngestionResult {
   phrase: PhraseNode;
@@ -114,52 +115,44 @@ export class IngestionPipeline {
     }
 
     // Step 2: Build/merge WORD nodes for distinct lemmas (only non-stop words)
-    const wordIds: string[] = [];
     const wordMap = new Map<string, string>(); // lemma -> wordId
     
-    // Process words with enhanced POS detection
-    for (let index = 0; index < tokens.length; index++) {
-      const token = tokens[index];
-      // Only create word nodes for non-stop words
-      if (!isStopWord(token)) {
-        const lemma = lemmas[index];
-        if (!wordMap.has(lemma)) {
-          // Use enhanced POS heuristics with context testing to get potential POS tags
-          let potentialPOS: string[];
-          try {
-            potentialPOS = await analyzePotentialPOSWithContext(lemma, pos[index]);
-          } catch (error) {
-            console.warn(`Enhanced POS analysis failed for "${lemma}", falling back to basic analysis:`, error);
-            potentialPOS = analyzePotentialPOS(lemma, pos[index]);
-          }
-          
-          const sources = getPOSGuessSources(lemma, pos[index]);
-          
-          // Create word with normalized lemma as both text and lemma
-          const morphPos = morphFeatures[index] ? `${pos[index]}:${morphFeatures[index]}` : pos[index];
-          const word = graph.upsertWord(lemma, lemma, potentialPOS, morphPos);
-          
-          // Update the word with POS potential sources if it's a new word
-          if (word.posPotentialSource?.includes('initial')) {
-            word.posPotentialSource = sources;
-          }
-          
-          wordMap.set(lemma, word.id);
-        } else {
-          // Update existing word with current POS observation
-          const morphPos = morphFeatures[index] ? `${pos[index]}:${morphFeatures[index]}` : pos[index];
-          graph.upsertWord(lemma, lemma, [], morphPos);
+    // Step 2.1: Use centralized PROPN span processing
+    const processWordCallback = (token: string, lemma: string, pos: string, morphFeature?: string): string => {
+      const normalizedLemma = lemma ? lemma.toLowerCase() : token.toLowerCase();
+      
+      if (!wordMap.has(normalizedLemma)) {
+        // Use basic POS analysis for synchronous processing
+        const potentialPOS = analyzePotentialPOS(normalizedLemma, pos);
+        const sources = getPOSGuessSources(normalizedLemma, pos);
+        
+        // Create word with normalized lemma as both text and lemma
+        const word = graph.upsertWord(normalizedLemma, normalizedLemma, potentialPOS, morphFeature || pos);
+        
+        // Update the word with POS potential sources if it's a new word
+        if (word.posPotentialSource?.includes('initial')) {
+          word.posPotentialSource = sources;
         }
-        wordIds.push(wordMap.get(lemma)!);
+        
+        wordMap.set(normalizedLemma, word.id);
       } else {
-        // For stop words, we don't create word nodes, but we need to maintain
-        // the wordIds array alignment with the original tokens
-        wordIds.push(''); // Placeholder for stop words
+        // Update existing word with current POS observation
+        graph.upsertWord(normalizedLemma, normalizedLemma, [], morphFeature || pos);
       }
-    }
+      
+      return wordMap.get(normalizedLemma)!;
+    };
+
+    const { wordIds } = processPropnSpans(
+      tokens,
+      lemmas,
+      pos,
+      morphFeatures,
+      processWordCallback
+    );
 
     // Step 3: Compute phrase posPattern (using original POS)
-    const posPattern = this.inferPosPattern(pos);
+    const posPattern = generatePosPattern(pos);
 
     // Step 4: Create/merge PHRASE node (using original lemmas and POS, but filtered wordIds)
     // Filter out empty word IDs (placeholders for stop words)
@@ -280,36 +273,6 @@ export class IngestionPipeline {
     return promotedPhrase;
   }
 
-  private inferPosPattern(pos: string[]): string {
-    // Convert to compact pattern format
-    const pattern = pos
-      .map(p => this.normalizePosTag(p))
-      .join('-');
-    
-    return pattern;
-  }
-
-  private normalizePosTag(pos: string): string {
-    // Map to our canonical format
-    const posMap: Record<string, string> = {
-      'NOUN': 'NOUN',
-      'PROPN': 'PROPN', // Keep proper nouns as PROPN
-      'VERB': 'VERB',
-      'ADJ': 'ADJ',
-      'ADV': 'ADV',
-      'ADP': 'ADP',
-      'DET': 'DET',
-      'AUX': 'AUX',
-      'PART': 'PART',
-      'PRON': 'PRON',
-      'NUM': 'NUM',
-      'PUNCT': 'PUNCT',
-      'SYM': 'SYM',
-      'X': 'X',
-    };
-    
-    return posMap[pos] || 'X';
-  }
 }
 
 // Export singleton instance and convenience functions
@@ -326,3 +289,4 @@ export const splitTextIntoPhrases = (text: string): string[] =>
 
 export const ingestBatchPhrases = async (text: string, graph: SemanticGraphLite, contextFrame?: ContextFrame): Promise<BatchIngestionResult> => 
   ingestionPipeline.ingestBatchPhrases(text, graph, contextFrame);
+
