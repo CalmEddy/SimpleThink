@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { useActiveNodes } from '../contexts/ActiveNodesContext.jsx';
 import type { SemanticGraphLite } from '../lib/semanticGraphLite.js';
 import type { TopicNode } from '../types/index.js';
@@ -7,7 +7,11 @@ interface TopicChipProps {
   graph: SemanticGraphLite;
 }
 
-export default function TopicChip({ graph }: TopicChipProps) {
+export interface TopicChipRef {
+  startTopicEntry: () => void;
+}
+
+const TopicChip = forwardRef<TopicChipRef, TopicChipProps>(({ graph }, ref) => {
   const { contextFrame, startTopicSession, endCurrentSession } = useActiveNodes();
   const [isEditing, setIsEditing] = useState(false);
   const [inputValue, setInputValue] = useState('');
@@ -50,6 +54,11 @@ export default function TopicChip({ graph }: TopicChipProps) {
     setShowDropdown(true);
     setTimeout(() => inputRef.current?.focus(), 0);
   };
+
+  // Expose the startTopicEntry function to parent components
+  useImperativeHandle(ref, () => ({
+    startTopicEntry: handleStartTopic
+  }));
 
   const handleChangeTopic = () => {
     setInputValue(contextFrame?.topicText || '');
@@ -217,4 +226,8 @@ export default function TopicChip({ graph }: TopicChipProps) {
       </button>
     </div>
   );
-}
+});
+
+TopicChip.displayName = 'TopicChip';
+
+export default TopicChip;

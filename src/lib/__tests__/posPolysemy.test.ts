@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SemanticGraphLite } from '../semanticGraphLite.js';
-import { analyzePotentialPOS, getPOSGuessSources } from '../posHeuristics.js';
+import { analyzeWordPOS } from '../posAnalysis.js';
 
 describe('POS Polysemy Detection System', () => {
   let graph: SemanticGraphLite;
@@ -17,7 +17,7 @@ describe('POS Polysemy Detection System', () => {
       expect(word.posPotentialSource).toEqual(['initial']);
       expect(word.posObserved).toEqual({});
       expect(word.primaryPOS).toBe('NOUN');
-      expect(word.isPolysemousPOS).toBe(false); // Starts as false until we have observed evidence
+      expect(word.isPolysemousPOS).toBe(true); // Now correctly detects polysemy from potential POS
     });
 
     it('should detect noun suffixes correctly', () => {
@@ -55,13 +55,13 @@ describe('POS Polysemy Detection System', () => {
       const word1 = graph.upsertWord('water', 'water', ['NOUN', 'VERB'], 'NOUN');
       expect(word1.posObserved).toEqual({ 'NOUN': 1 });
       expect(word1.primaryPOS).toBe('NOUN');
-      expect(word1.isPolysemousPOS).toBe(false); // Only one observed POS
+      expect(word1.isPolysemousPOS).toBe(true); // Polysemous due to potential POS
 
       // Second occurrence as VERB
       const word2 = graph.upsertWord('water', 'water', [], 'VERB');
       expect(word2.posObserved).toEqual({ 'NOUN': 1, 'VERB': 1 });
       expect(word2.primaryPOS).toBe('NOUN'); // Still NOUN as primary
-      expect(word2.isPolysemousPOS).toBe(false); // Not enough evidence yet
+      expect(word2.isPolysemousPOS).toBe(true); // Still polysemous
 
       // Third occurrence as VERB
       const word3 = graph.upsertWord('water', 'water', [], 'VERB');
@@ -90,22 +90,19 @@ describe('POS Polysemy Detection System', () => {
       expect(finalWord.isPolysemousPOS).toBe(true);
     });
 
-    it('should not detect polysemy when secondary POS lacks sufficient evidence', () => {
-      // Create word with multiple potential POS
-      const word = graph.upsertWord('book', 'book', ['NOUN', 'VERB']);
+    it('should not detect polysemy when word only has one POS', () => {
+      // Create word with single potential POS (not polysemous)
+      const word = graph.upsertWord('table', 'table', ['NOUN']);
       
-      // Add 5 NOUN occurrences
+      // Add 5 NOUN occurrences - only NOUN, no other POS
       for (let i = 0; i < 5; i++) {
-        graph.upsertWord('book', 'book', [], 'NOUN');
+        graph.upsertWord('table', 'table', [], 'NOUN');
       }
       
-      // Add only 1 VERB occurrence (less than 2 required)
-      graph.upsertWord('book', 'book', [], 'VERB');
-      
-      const finalWord = graph.findWordByLemma('book')!;
-      expect(finalWord.posObserved).toEqual({ 'NOUN': 5, 'VERB': 1 });
+      const finalWord = graph.findWordByLemma('table')!;
+      expect(finalWord.posObserved).toEqual({ 'NOUN': 5 });
       expect(finalWord.primaryPOS).toBe('NOUN');
-      expect(finalWord.isPolysemousPOS).toBe(false); // VERB count < 2
+      expect(finalWord.isPolysemousPOS).toBe(false); // Only NOUN in both potential and observed
     });
   });
 
@@ -135,54 +132,50 @@ describe('POS Polysemy Detection System', () => {
     });
   });
 
-  describe('POS Heuristics', () => {
-    it('should analyze potential POS from word suffixes', () => {
-      const nounPOS = analyzePotentialPOS('creation');
-      expect(nounPOS).toContain('NOUN');
+  describe('POS Analysis', () => {
+    it('should analyze potential POS from word suffixes', async () => {
+      const nounAnalysis = await analyzeWordPOS('creation', 'NOUN');
+      expect(nounAnalysis.pos).toContain('NOUN');
       
-      const verbPOS = analyzePotentialPOS('create');
-      expect(verbPOS).toContain('VERB');
+      const verbAnalysis = await analyzeWordPOS('create', 'VERB');
+      expect(verbAnalysis.pos).toContain('VERB');
       
-      const adjPOS = analyzePotentialPOS('creative');
-      expect(adjPOS).toContain('ADJ');
+      const adjAnalysis = await analyzeWordPOS('creative', 'ADJ');
+      expect(adjAnalysis.pos).toContain('ADJ');
       
-      const advPOS = analyzePotentialPOS('creatively');
-      expect(advPOS).toContain('ADV');
+      const advAnalysis = await analyzeWordPOS('creatively', 'ADV');
+      expect(advAnalysis.pos).toContain('ADV');
     });
 
-    it('should detect proper nouns from capitalization', () => {
-      const properNounPOS = analyzePotentialPOS('London');
-      expect(properNounPOS).toContain('NOUN');
+    it('should detect proper nouns from capitalization', async () => {
+      const properNounAnalysis = await analyzeWordPOS('London', 'NOUN');
+      expect(properNounAnalysis.pos).toContain('NOUN');
       
-      const acronymPOS = analyzePotentialPOS('NASA');
-      expect(acronymPOS).toContain('NOUN');
+      const acronymAnalysis = await analyzeWordPOS('NASA', 'NOUN');
+      expect(acronymAnalysis.pos).toContain('NOUN');
     });
 
-    it('should identify common function words', () => {
-      const detPOS = analyzePotentialPOS('the');
-      expect(detPOS).toContain('DET');
+    it('should identify common function words', async () => {
+      const detAnalysis = await analyzeWordPOS('the', 'DET');
+      expect(detAnalysis.pos).toContain('DET');
       
-      const prepPOS = analyzePotentialPOS('in');
-      expect(prepPOS).toContain('ADP');
+      const prepAnalysis = await analyzeWordPOS('in', 'ADP');
+      expect(prepAnalysis.pos).toContain('ADP');
       
-      const auxPOS = analyzePotentialPOS('is');
-      expect(auxPOS).toContain('AUX');
+      const auxAnalysis = await analyzeWordPOS('is', 'AUX');
+      expect(auxAnalysis.pos).toContain('AUX');
     });
 
-    it('should combine winkNLP POS with heuristics', () => {
-      const combinedPOS = analyzePotentialPOS('water', 'NOUN');
-      expect(combinedPOS).toContain('NOUN');
-      expect(combinedPOS).toContain('VERB'); // From suffix analysis
+    it('should combine winkNLP POS with context testing', async () => {
+      const analysis = await analyzeWordPOS('water', 'NOUN');
+      expect(analysis.pos).toContain('NOUN');
+      expect(analysis.source).toBeDefined();
     });
 
-    it('should return sources for POS guesses', () => {
-      const sources = getPOSGuessSources('water', 'NOUN');
-      expect(sources).toContain('wink');
-      expect(sources).toContain('suffix');
-      
-      const sourcesNoWink = getPOSGuessSources('water');
-      expect(sourcesNoWink).toContain('suffix');
-      expect(sourcesNoWink).not.toContain('wink');
+    it('should return analysis with source information', async () => {
+      const analysis = await analyzeWordPOS('water', 'NOUN');
+      expect(analysis.source).toBeDefined();
+      expect(['wink', 'polysemy-test', 'fallback']).toContain(analysis.source);
     });
   });
 

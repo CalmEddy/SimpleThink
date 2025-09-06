@@ -81,14 +81,14 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
         setLastResponse(result.responseNode);
       } else if (selectedEphemeralPrompt && contextFrame) {
         // Responding to ephemeral prompt - convert to stored prompt first
-        const promptNode = graph.recordPrompt({
-          text: selectedEphemeralPrompt.text,
-          templateSignature: selectedEphemeralPrompt.templateSignature,
-          bindings: selectedEphemeralPrompt.bindings,
-          randomSeed: selectedEphemeralPrompt.randomSeed,
-          createdBy: 'system',
-          createdAt: Date.now(),
-        });
+        const promptNode = graph.recordPrompt(
+          selectedEphemeralPrompt.templateId,
+          selectedEphemeralPrompt.text,
+          selectedEphemeralPrompt.bindings.map(b => ({
+            slot: b.slot.pos,
+            fillerNodeId: b.nodeId || ''
+          }))
+        );
 
         // Link to topic/session
         graph.addEdge(promptNode.id, contextFrame.topicId, 'PROMPT_ABOUT_TOPIC');
@@ -195,7 +195,7 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
                 >
                   <div className="font-medium text-gray-800">{prompt.text}</div>
                   <div className="text-sm text-gray-600 mt-1">
-                    Template: {prompt.templateId} • {prompt.bindings.length} bindings
+                    Template: {prompt.templateId} • {prompt.bindings?.length || 0} bindings
                   </div>
                   <div className="text-xs text-gray-500 mt-1">
                     Signature: {prompt.templateSignature}
@@ -226,7 +226,7 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
                 >
                   <div className="font-medium text-gray-800">{prompt.templateText}</div>
                   <div className="text-sm text-gray-600 mt-1">
-                    Template: {prompt.templateId} • {prompt.bindings.length} bindings
+                    Template: {prompt.templateId} • {prompt.bindings?.length || 0} bindings
                   </div>
                   <div className="text-xs text-gray-500 mt-1">
                     Created: {new Date(prompt.createdAt).toLocaleString()}

@@ -509,7 +509,9 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
             <div className="text-sm text-gray-600">{ctx.chunks.length} chunks</div>
           </div>
           <div className="max-h-56 overflow-auto space-y-2">
-            {ctx.chunks.map(ch => (
+            {Array.from(
+              new Map(ctx.chunks.map(ch => [ch.posPattern, ch])).values()
+            ).map(ch => (
               <div key={ch.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
                 <span className="bg-gray-200 px-2 py-1 rounded text-xs mr-2">{ch.posPattern}</span>
                 <button
@@ -530,7 +532,9 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
             <div className="text-sm text-gray-600">{ctx.phrases.length} phrases</div>
           </div>
           <div className="max-h-56 overflow-auto space-y-2">
-            {ctx.phrases.map(ph => (
+            {Array.from(
+              new Map(ctx.phrases.map(ph => [ph.posPattern, ph])).values()
+            ).map(ph => (
               <div key={ph.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
                 <div className="truncate text-sm flex-1 mr-2">{ph.text}</div>
                 <div className="flex items-center gap-2">

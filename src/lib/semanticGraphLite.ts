@@ -17,7 +17,7 @@ import type {
   PromptSlotBinding,
   SessionLocks,
 } from '../types/index.js';
-import { auditPosPotentialForLemma } from './wordAnalysis.js';
+import { analyzeWordPOS } from './posAnalysis.js';
 
 export class SemanticGraphLite {
   private nodes = new Map<NodeId, Node>();
@@ -68,11 +68,13 @@ export class SemanticGraphLite {
         this.updateWordPOSStats(existingWord);
       }
       
-      // Merge POS tags
+      // Merge POS tags and posPotential
       const mergedPos = [...new Set([...existingWord.pos, ...pos])];
+      const mergedPosPotential = [...new Set([...(existingWord.posPotential || []), ...pos])];
       const updatedWord: WordNode = {
         ...existingWord,
         pos: mergedPos,
+        posPotential: mergedPosPotential,
       };
       
       // Update polysemy status after merging POS tags
@@ -225,6 +227,11 @@ export class SemanticGraphLite {
       }
     }
     
+    // If no observed counts, use the first potential POS
+    if (Object.keys(word.posObserved).length === 0 && word.posPotential && word.posPotential.length > 0) {
+      primaryPOS = word.posPotential[0];
+    }
+    
     // Simple polysemy detection: word is polysemous if it has multiple POS tags
     // Check both observed POS and potential POS
     const observedPOS = Object.keys(word.posObserved);
@@ -237,6 +244,11 @@ export class SemanticGraphLite {
     // Update the word
     word.primaryPOS = primaryPOS;
     word.isPolysemousPOS = isPolysemous;
+    
+    // Update the display POS to use the primary POS from observed counts
+    if (primaryPOS && Object.keys(word.posObserved).length > 0) {
+      word.pos = [primaryPOS];
+    }
   }
 
   // Prompt operations
@@ -371,6 +383,14 @@ export class SemanticGraphLite {
 
     // Restore nodes
     json.nodes.forEach(node => {
+      // Migrate old prompt nodes that might not have bindings property
+      if (node.type === 'PROMPT') {
+        const promptNode = node as PromptNode;
+        if (!promptNode.bindings) {
+          promptNode.bindings = [];
+        }
+      }
+      
       this.nodes.set(node.id, node);
       if (node.type === 'WORD') {
         this.updateWordIndex(node);
@@ -497,9 +517,10 @@ export class SemanticGraphLite {
 
   // POS Potential Audit methods
   async auditWordPosPotential(word: WordNode): Promise<void> {
-    const { pos, sources } = await auditPosPotentialForLemma(word.lemma);
-    word.posPotential = pos;
-    word.posPotentialSource = sources;
+    const analysis = await analyzeWordPOS(word.lemma, word.primaryPOS || 'NOUN');
+    word.posPotential = analysis.pos;
+    word.posPotentialSource = [analysis.source];
+    word.isPolysemousPOS = analysis.isPolysemous;
     word.posPotentialLastAuditedAt = Date.now();
   }
 

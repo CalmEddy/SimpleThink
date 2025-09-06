@@ -1,10 +1,10 @@
 import type { SemanticGraphLite } from './semanticGraphLite.js';
 import type { PhraseNode } from '../types/index.js';
-import { analyzeText, extractChunks } from './nlp.js';
+import { analyze, extractChunks } from './nlp.js';
 import { recordChunks } from './chunkCatalog.js';
-import { analyzePotentialPOS, analyzePotentialPOSWithContext, getPOSGuessSources } from './posHeuristics.js';
+import { analyzeWordPOS } from './posAnalysis.js';
 import { isStopWord, getStopWordRatio } from './stopWords.js';
-import { generatePosPattern, processPropnSpans } from './posNormalization.js';
+import { generatePosPattern } from './posNormalization.js';
 
 export interface IngestionResult {
   phrase: PhraseNode;
@@ -95,71 +95,96 @@ export class IngestionPipeline {
   }
 
   async ingestPhraseText(text: string, graph: SemanticGraphLite, contextFrame?: ContextFrame): Promise<IngestionResult> {
-    // Step 1: NLP analysis
-    const { tokens, lemmas, pos, morphFeatures } = await analyzeText(text);
+    // Step 1: Get normalized analysis result
+    const norm = await analyze(text);
+    const { tokens, compounds } = norm;
     
     if (tokens.length === 0) {
       throw new Error('No tokens found in text');
     }
 
     // Check if phrase is only stop words
-    const contentWords = tokens.filter(token => !isStopWord(token));
+    const contentWords = tokens.filter(token => !isStopWord(token.value));
     if (contentWords.length === 0) {
       throw new Error('Phrase contains only stop words and cannot be ingested');
     }
 
     // Check if phrase has too many stop words (more than 70%)
-    const stopWordRatio = getStopWordRatio(tokens);
+    const stopWordRatio = getStopWordRatio(tokens.map(t => t.value));
     if (stopWordRatio > 0.7) {
       throw new Error(`Phrase has too many stop words (${(stopWordRatio * 100).toFixed(1)}%). Maximum allowed is 70%.`);
     }
 
-    // Step 2: Build/merge WORD nodes for distinct lemmas (only non-stop words)
+    // Step 2: Build/merge WORD nodes
     const wordMap = new Map<string, string>(); // lemma -> wordId
     
-    // Step 2.1: Use centralized PROPN span processing
-    const processWordCallback = (token: string, lemma: string, pos: string, morphFeature?: string): string => {
-      const normalizedLemma = lemma ? lemma.toLowerCase() : token.toLowerCase();
+    // Step 2.1: Insert compound nodes (collapsed multi-token PROPN) first
+    for (const compound of compounds) {
+      // Ensure compound lemma exists and is a string
+      if (!compound.lemma || typeof compound.lemma !== 'string') {
+        continue;
+      }
+      
+      const normalizedLemma = compound.lemma.toLowerCase();
       
       if (!wordMap.has(normalizedLemma)) {
-        // Use basic POS analysis for synchronous processing
-        const potentialPOS = analyzePotentialPOS(normalizedLemma, pos);
-        const sources = getPOSGuessSources(normalizedLemma, pos);
+        const analysis = await analyzeWordPOS(normalizedLemma, compound.pos);
         
         // Create word with normalized lemma as both text and lemma
-        const word = graph.upsertWord(normalizedLemma, normalizedLemma, potentialPOS, morphFeature || pos);
+        const word = graph.upsertWord(normalizedLemma, normalizedLemma, analysis.pos, compound.pos);
         
-        // Update the word with POS potential sources if it's a new word
-        if (word.posPotentialSource?.includes('initial')) {
-          word.posPotentialSource = sources;
-        }
+        word.isPolysemousPOS = analysis.isPolysemous;
+        word.posPotential = analysis.pos;
+        word.posPotentialSource = [analysis.source];
         
         wordMap.set(normalizedLemma, word.id);
       } else {
         // Update existing word with current POS observation
-        graph.upsertWord(normalizedLemma, normalizedLemma, [], morphFeature || pos);
+        graph.upsertWord(normalizedLemma, normalizedLemma, [], compound.pos);
+      }
+    }
+
+    // Step 2.2: Insert remaining tokens that are marked keep=true
+    for (const token of tokens) {
+      if (!token.keep) continue; // skip compound members and possessive 's
+      
+      // Belt & suspenders: skip stop words even if they somehow got through
+      if (isStopWord(token.lemma) || isStopWord(token.value)) continue;
+      
+      // Ensure lemma exists and is a string
+      if (!token.lemma || typeof token.lemma !== 'string') {
+        continue;
       }
       
-      return wordMap.get(normalizedLemma)!;
-    };
+      const normalizedLemma = token.lemma.toLowerCase();
+      
+      if (!wordMap.has(normalizedLemma)) {
+        const analysis = await analyzeWordPOS(normalizedLemma, token.pos);
+        
+        // Create word with normalized lemma as both text and lemma
+        const word = graph.upsertWord(normalizedLemma, normalizedLemma, analysis.pos, token.pos);
+        
+        word.isPolysemousPOS = analysis.isPolysemous;
+        word.posPotential = analysis.pos;
+        word.posPotentialSource = [analysis.source];
+        
+        wordMap.set(normalizedLemma, word.id);
+      } else {
+        // Update existing word with current POS observation
+        graph.upsertWord(normalizedLemma, normalizedLemma, [], token.pos);
+      }
+    }
 
-    const { wordIds } = processPropnSpans(
-      tokens,
-      lemmas,
-      pos,
-      morphFeatures,
-      processWordCallback
-    );
+    // Step 3: Compute phrase posPattern (using normalized POS)
+    const posPattern = generatePosPattern(tokens.map(t => t.pos));
 
-    // Step 3: Compute phrase posPattern (using original POS)
-    const posPattern = generatePosPattern(pos);
-
-    // Step 4: Create/merge PHRASE node (using original lemmas and POS, but filtered wordIds)
-    // Filter out empty word IDs (placeholders for stop words)
-    const validWordIds = wordIds.filter(id => id !== '');
+    // Step 4: Create/merge PHRASE node
+    const lemmas = tokens.map(t => t.lemma);
+    const pos = tokens.map(t => t.pos);
+    const validWordIds = Array.from(wordMap.values());
     const phrase = graph.upsertPhrase(text, lemmas, posPattern, validWordIds, undefined, pos);
 
-    // Step 5: Extract chunks and attach to phrase (using original data)
+    // Step 5: Extract chunks and attach to phrase
     const chunks = extractChunks(lemmas, pos);
     const topChunks = chunks.slice(0, 8); // Cap to top K=8 by score
     graph.addChunksToPhrase(phrase.id, topChunks);
@@ -226,24 +251,15 @@ export class IngestionPipeline {
         let word = existingWords.find(w => w.type === 'WORD' && (w as any).lemma === lemma) as any;
         
         if (!word) {
-          // Create new word node with enhanced POS heuristics
+          // Create new word node with unified POS analysis
           const chunkPOS = chunkPosArray[index] || 'X';
-          let potentialPOS: string[];
-          try {
-            potentialPOS = await analyzePotentialPOSWithContext(lemma, chunkPOS);
-          } catch (error) {
-            console.warn(`Enhanced POS analysis failed for "${lemma}" in chunk, falling back to basic analysis:`, error);
-            potentialPOS = analyzePotentialPOS(lemma, chunkPOS);
-          }
+          const analysis = await analyzeWordPOS(lemma, chunkPOS);
           
-          const sources = getPOSGuessSources(lemma, chunkPOS);
+          word = graph.upsertWord(lemma, lemma, analysis.pos, chunkPOS);
           
-          word = graph.upsertWord(lemma, lemma, potentialPOS, chunkPOS);
-          
-          // Update the word with POS potential sources if it's a new word
-          if (word.posPotentialSource?.includes('initial')) {
-            word.posPotentialSource = sources;
-          }
+          word.isPolysemousPOS = analysis.isPolysemous;
+          word.posPotential = analysis.pos;
+          word.posPotentialSource = [analysis.source];
         } else {
           // Update existing word with current POS observation
           const chunkPOS = chunkPosArray[index] || 'X';

@@ -34,11 +34,12 @@ export const STOP_WORDS = new Set([
 
 /**
  * Check if a word should be filtered out as a stop word
- * @param word The word to check (should be lowercase)
- * @returns true if the word is a stop word and should be filtered
+ * @param s The string to check (can be undefined or null)
+ * @returns true if the string is a stop word and should be filtered
  */
-export function isStopWord(word: string): boolean {
-  return STOP_WORDS.has(word.toLowerCase());
+export function isStopWord(s: string | undefined | null): boolean {
+  if (!s) return false;
+  return STOP_WORDS.has(s.toLowerCase());
 }
 
 /**

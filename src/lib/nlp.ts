@@ -1,102 +1,19 @@
 import winkNLP from 'wink-nlp';
 import type { PhraseChunk } from '../types/index.js';
-import { normalizePosTag, generatePosPattern } from './posNormalization.js';
+import { normalizePOS, NormalizationResult, BaseTok, generatePosPattern, normalizePosTag } from './posNormalization.js';
+
+// === Self-contained, deterministic context POS tester ===
+
 
 // Initialize winkNLP with error handling
 let nlp: any = null;
 let isInitialized = false;
 let MODEL_HAS_NER = false;
 
-// Create fallback NLP instance
-const createFallbackNLP = () => ({
-  readDoc: (text: string) => ({
-    tokens: () => ({
-      each: (callback: (token: any, index?: number) => void) => {
-        // Preprocess contractions in fallback mode too
-        const preprocessedText = text
-          .replace(/(\w+)'s\b/g, '$1')  // Remove possessive 's (nature's -> nature)
-          .replace(/(\w+)'re\b/g, '$1 are')  // Handle "they're" -> "they are"
-          .replace(/(\w+)'ve\b/g, '$1 have')  // Handle "I've" -> "I have"
-          .replace(/(\w+)'ll\b/g, '$1 will')  // Handle "I'll" -> "I will"
-          .replace(/(\w+)'d\b/g, '$1 would')  // Handle "I'd" -> "I would"
-          .replace(/(\w+)'m\b/g, '$1 am')     // Handle "I'm" -> "I am"
-          .replace(/(\w+)n't\b/g, '$1 not')   // Handle "don't" -> "do not"
-          .replace(/\bcan't\b/g, 'cannot')    // Handle "can't" -> "cannot"
-          .replace(/\bwon't\b/g, 'will not')  // Handle "won't" -> "will not"
-          .replace(/\bshan't\b/g, 'shall not'); // Handle "shan't" -> "shall not"
-          
-        preprocessedText.split(/\s+/).forEach((word, index) => {
-          // Skip punctuation
-          if (/^[^\w\s]+$/.test(word)) {
-            return;
-          }
-          
-          // Use suffix-based heuristics as fallback
-          let posTag = guessPOSBySuffix(word);
-          
-          callback({
-            out: () => word,
-            index: () => index,
-            lemma: word.replace(/[^\w]/g, '').toLowerCase(), // Simple fallback without broken rules
-            pos: posTag
-          }, index);
-        });
-      }
-    }),
-    entities: () => ({
-      each: (callback: (entity: any) => void) => {
-        // Simple fallback NER: detect capitalized words as potential proper nouns
-        const words = text.split(/\s+/);
-        const entities: string[] = [];
-        
-        // Look for capitalized words that might be proper nouns
-        for (let i = 0; i < words.length; i++) {
-          const word = words[i].replace(/[^\w]/g, '');
-          if (word.length > 0 && word[0] === word[0].toUpperCase() && word.length > 1) {
-            entities.push(word);
-          }
-        }
-        
-        // Create entity objects for each detected proper noun
-        entities.forEach(entityText => {
-          callback({
-            out: () => entityText,
-            tokens: () => ({
-              each: (tokenCallback: (token: any) => void) => {
-                // Find the token indices for this entity
-                const words = text.split(/\s+/);
-                for (let i = 0; i < words.length; i++) {
-                  const word = words[i].replace(/[^\w]/g, '');
-                  if (word.toLowerCase() === entityText.toLowerCase()) {
-                    tokenCallback({
-                      index: () => i,
-                      out: () => word
-                    });
-                  }
-                }
-              }
-            })
-          });
-        });
-      }
-    })
-  })
-});
+// Fallback NLP instance removed - now using centralized posNormalization
 
 // Additional helper functions for robust NER detection
 const its = () => nlp.its;
-
-// Helper functions
-const isPunctuationToken = (t: any): boolean => {
-  const p = t.out(its().pos);
-  if (p === 'PUNCT') return true;
-  const v = t.out(its().value);
-  return isPunctValue(v);
-};
-
-const isCapitalizedWordRaw = (raw: string): boolean => {
-  return /^[A-Z][a-zA-Z']*$/.test(raw); // supports "Lincoln's" sans trailing apostrophe-s
-};
 
 // Preserve case; only normalize smart quotes → ASCII straight quotes
 const preprocessContractionsPreserveCase = (s: string): string => {
@@ -105,62 +22,7 @@ const preprocessContractionsPreserveCase = (s: string): string => {
     .replace(/\u2018/g, "'"); // left single quote
 };
 
-const isPunctValue = (v: string): boolean => {
-  return /^[^\w\s]+$/.test(v);
-};
-
-// Replace with stricter helpers
-// Capitalized "word-like" token (Unicode-aware; allows O'Neil, McDonald, etc.)
-const isCapitalizedWord = (v: string): boolean => {
-  // Starts with an uppercase letter, then one or more letters; allows internal apostrophes/hyphens.
-  return /^[\p{Lu}][\p{L}]+(?:[''\-][\p{L}]+)*$/u.test(v);
-};
-const isAllCapsAcronym = (v: string): boolean => /^[A-Z]{2,}$/.test(v);
-const isAlphaLike = (v: string): boolean => /[A-Za-z]/.test(v);
-
-// possessive token such as "'s" or "'s"
-const isPossessivePart = (v: string): boolean => v === "'s" || v === "'s";
-
-// Heuristic: a sentence looks like Title Case if >50% alpha tokens are capitalized words
-const isTitleCaseSentence = (tokens: Array<{ value: string }>): boolean => {
-  let alpha = 0, caps = 0;
-  for (const t of tokens) {
-    if (!isAlphaLike(t.value)) continue;
-    alpha++;
-    if (isCapitalizedWord(t.value)) caps++;
-  }
-  return alpha > 0 && (caps / alpha) > 0.5;
-};
-
-const NAME_LIKE_TYPES = new Set([
-  'PERSON',
-  'ORG',
-  'GPE',
-  'LOC',
-  'PRODUCT',
-  'WORK_OF_ART',
-  'EVENT',
-]);
-
-// Helper function for suffix-based POS guessing (used in fallback)
-const guessPOSBySuffix = (word: string): string => {
-  // Suffix-based POS heuristics (similar to wordAnalysis.ts)
-  const NOUN_SUFFIX = [/tion$/, /ment$/, /ness$/, /ity$/, /ship$/, /(er|or)$/, /ter$/];
-  const VERB_SUFFIX = [/ize$/, /ise$/, /ify$/, /ate$/, /er$/];
-  const ADJ_SUFFIX = [/al$/, /ive$/, /ous$/, /(able|ible)$/, /ic$/, /ish$/, /less$/, /ful$/, /est$/];
-  const ADV_SUFFIX = [/ly$/];
-  
-  const lower = word.toLowerCase();
-  
-  // Check suffixes in order of specificity
-  if (ADJ_SUFFIX.some(rx => rx.test(lower))) return 'ADJ';
-  if (ADV_SUFFIX.some(rx => rx.test(lower))) return 'ADV';
-  if (VERB_SUFFIX.some(rx => rx.test(lower))) return 'VERB';
-  if (NOUN_SUFFIX.some(rx => rx.test(lower))) return 'NOUN';
-  
-  // Default fallback
-  return 'NOUN';
-};
+// Helper functions removed - now using centralized posNormalization
 
 // Probe NER capability
 const probeNerCapability = (nlpInst: typeof nlp): boolean => {
@@ -205,6 +67,35 @@ export interface AnalysisResult {
   morphFeatures: string[]; // NEW: morphological features
 }
 
+// New function to extract raw tokens from winkNLP
+export function tagTextToTokens(doc: any): BaseTok[] {
+  const I = its();
+  const tokens: BaseTok[] = [];
+  let index = 0;
+  
+  // Use the original method that was working
+  doc.tokens().each((t: any) => {
+    const value = t.out(I.value);
+    const lemma = t.out(I.lemma);
+    const pos = t.out(I.pos);
+    const tokenIndex = t.out(I.index);
+    
+    // Skip punctuation tokens
+    if (pos !== 'PUNCT') {
+      tokens.push({
+        value: value || '',
+        lemma: lemma || value || '',
+        pos: pos || 'X',
+        index: tokenIndex ?? index,
+        sentenceId: undefined, // winkNLP lite doesn't provide sentenceId
+      });
+      index++;
+    }
+  });
+  
+  return tokens;
+}
+
 export class NLPAnalyzer {
   private static instance: NLPAnalyzer;
   
@@ -226,145 +117,39 @@ export class NLPAnalyzer {
     const preprocessed = preprocessContractionsPreserveCase(text);
     const doc = nlp.readDoc(preprocessed);
 
-    const I = its(); // shorthand
-
+    // Extract raw tokens from winkNLP
+    const baseTokens = tagTextToTokens(doc);
+    
+    // Use centralized POS normalization
+    const normalizationResult = normalizePOS(baseTokens);
+    
+    // Extract the normalized data for backward compatibility
     const tokens: string[] = [];
     const lemmas: string[] = [];
     const pos: string[] = [];
-    const morphFeatures: string[] = []; // NEW: morphological features
+    const morphFeatures: string[] = [];
 
-    // Map the doc token index → our compacted array index (since we skip punctuation)
-    const docIdxToArrIdx = new Map<number, number>();
-
-    // 1) First pass: collect tokens/lemmas/pos; skip punctuation in OUTPUT arrays
-    doc.tokens().each((t: any) => {
-      const docIdx = t.out(I.index) as number;
-      const val = t.out(I.value);
-      const tag = t.out(I.pos);
-
-      if (!isPunctuationToken(t)) {
-        const arrIdx = tokens.length;
-        tokens.push(val);
-
-        let lemma = val; // fallback
-        try {
-          const l = t.out(I.lemma);
-          if (l) lemma = l;
-        } catch {
-          // keep fallback
-        }
-        lemmas.push(lemma);
-        pos.push(tag);
-        
-        // NEW: Extract morphological features
-        let morph = '';
-        try {
-          // Try to get morphological features from winkNLP
-          const morphInfo = t.out(I.morph);
+    for (const token of normalizationResult.tokens) {
+      tokens.push(token.value);
+      lemmas.push(token.lemma);
+      pos.push(token.pos);
+      
+      // Extract morphological features
+      let morph = '';
+      try {
+        const I = its();
+        const t = doc.tokens().out(I.detail)[token.index];
+        if (t) {
+          const morphInfo = t.out ? t.out(I.morph) : null;
           if (morphInfo) {
             morph = morphInfo;
           }
-        } catch {
-          // Fallback: infer from token form
-          morph = inferMorphFromToken(val, lemma, tag);
         }
-        morphFeatures.push(morph);
-        
-        docIdxToArrIdx.set(docIdx, arrIdx);
+      } catch {
+        // Fallback: infer from token form
+        morph = inferMorphFromToken(token.value, token.lemma, token.pos);
       }
-    });
-
-    // 2) Second pass: upgrade NOUN→PROPN for entity tokens (NER) or capitalized runs (NER-lite)
-    if (MODEL_HAS_NER) {
-      doc.entities().each((ent: any) => {
-        // Consider only name-like entity types
-        const et = ent.out(I.type);
-        if (!NAME_LIKE_TYPES.has(et)) return;
-
-        ent.tokens().each((t: any) => {
-          const dIdx = t.out(I.index) as number;
-          const aIdx = docIdxToArrIdx.get(dIdx);
-          if (aIdx != null && pos[aIdx] === 'NOUN') pos[aIdx] = 'PROPN';
-        });
-      });
-    } else {
-      // NER-lite (stricter): runs of ≥2 Capitalized words within same sentence.
-      // Allow a trailing possessive PART ('s). Also allow ALL-CAPS acronyms.
-      const tokenDetails = doc.tokens().out(I.detail) as Array<{
-        value: string; pos: string; index: number; sentenceId?: number
-      }>;
-      const sentences = new Map<number, Array<{ value: string; pos: string; index: number }>>();
-      for (const td of tokenDetails) {
-        const sid = (td as any).sentenceId ?? 0; // if sentenceId not provided, treat all as one
-        if (!sentences.has(sid)) sentences.set(sid, []);
-        sentences.get(sid)!.push(td);
-      }
-
-      // Track which array positions we upgrade by fallback so we can optionally demote later
-      const upgradedByFallback = new Set<number>();
-
-      for (const [, sentTokens] of sentences) {
-        if (isTitleCaseSentence(sentTokens)) continue;
-
-        // 1) Only upgrade runs of 2+ capitalized words (multi-word entities).
-        // NOTE: do NOT include a trailing PART ('s) in the run.
-        let s = -1;
-        const flushRun = (e: number) => {
-          const len = e - s;
-          if (s !== -1 && len >= 2) {
-            for (let k = s; k < e; k++) {
-              const aIdx = docIdxToArrIdx.get(sentTokens[k].index);
-              if (aIdx != null && (pos[aIdx] === 'NOUN' || pos[aIdx] === 'X' || pos[aIdx] === 'UNKNOWN')) {
-                pos[aIdx] = 'PROPN';       // upgrade both tokens (e.g., Mother, Nature)
-                upgradedByFallback.add(aIdx);
-              }
-            }
-          }
-        };
-        for (let i = 0; i < sentTokens.length; i++) {
-          const t = sentTokens[i];
-          if (!isPunctValue(t.value) && isCapitalizedWord(t.value)) {
-            if (s === -1) s = i;
-            continue;
-          }
-          // If we're in a run and see a possessive PART ("'s"/"'s"), allow it and keep the run open.
-          if (s !== -1 && isPossessivePart(t.value)) {
-            continue; // don't close the run
-          }
-          // Anything else ends the run
-          flushRun(i);
-          s = -1;
-        }
-        flushRun(sentTokens.length);
-
-        // 2) Single-token ALL-CAPS acronyms (≥2 letters)
-        for (let i = 0; i < sentTokens.length; i++) {
-          const t = sentTokens[i];
-          if (isAllCapsAcronym(t.value)) {
-            const aIdx = docIdxToArrIdx.get(t.index);
-            if (aIdx != null && (pos[aIdx] === 'NOUN' || pos[aIdx] === 'X' || pos[aIdx] === 'UNKNOWN')) {
-              pos[aIdx] = 'PROPN';
-              upgradedByFallback.add(aIdx);
-            }
-          }
-        }
-      }
-
-      // Demotion pass (unchanged except guard):
-      // If PROPN set only by fallback and not an acronym, demote to NOUN
-      for (let i = 0; i < pos.length; i++) {
-        if (pos[i] !== 'PROPN') continue;
-        if (!upgradedByFallback.has(i)) continue;
-        const orig = tokens[i] ?? '';
-        const looksAcronym = isAllCapsAcronym(orig);
-        if (!looksAcronym) {
-          const lemma = lemmas[i] ?? tokens[i] ?? '';
-          const surface = tokens[i] ?? '';
-          if (lemma.toLowerCase() === surface.toLowerCase()) {
-            pos[i] = 'NOUN';
-          }
-        }
-      }
+      morphFeatures.push(morph);
     }
 
     return { tokens, lemmas, pos, morphFeatures };
@@ -408,146 +193,10 @@ export class NLPAnalyzer {
     return this.deduplicateAndScoreChunks(filteredChunks);
   }
 
-  private isPunctuation(text: string): boolean {
-    // Check if the text is only punctuation
-    return /^[^\w\s]+$/.test(text);
-  }
-
-  private preprocessContractions(text: string): string {
-    // Handle common contractions to prevent them from being split into separate tokens
-    // This ensures that "nature's" stays as one token instead of becoming "nature" and "'s"
-    return text
-      .replace(/(\w+)'s\b/g, '$1')  // Remove possessive 's (nature's -> nature)
-      .replace(/(\w+)'re\b/g, '$1 are')  // Handle "they're" -> "they are"
-      .replace(/(\w+)'ve\b/g, '$1 have')  // Handle "I've" -> "I have"
-      .replace(/(\w+)'ll\b/g, '$1 will')  // Handle "I'll" -> "I will"
-      .replace(/(\w+)'d\b/g, '$1 would')  // Handle "I'd" -> "I would"
-      .replace(/(\w+)'m\b/g, '$1 am')     // Handle "I'm" -> "I am"
-      .replace(/(\w+)n't\b/g, '$1 not')   // Handle "don't" -> "do not"
-      .replace(/\bcan't\b/g, 'cannot')    // Handle "can't" -> "cannot"
-      .replace(/\bwon't\b/g, 'will not')  // Handle "won't" -> "will not"
-      .replace(/\bshan't\b/g, 'shall not'); // Handle "shan't" -> "shall not"
-  }
-
-  private guessPOSBySuffix(word: string): string {
-    // Suffix-based POS heuristics (similar to wordAnalysis.ts)
-    const NOUN_SUFFIX = [/tion$/, /ment$/, /ness$/, /ity$/, /ship$/, /(er|or)$/, /ter$/];
-    const VERB_SUFFIX = [/ize$/, /ise$/, /ify$/, /ate$/, /er$/];
-    const ADJ_SUFFIX = [/al$/, /ive$/, /ous$/, /(able|ible)$/, /ic$/, /ish$/, /less$/, /ful$/, /est$/];
-    const ADV_SUFFIX = [/ly$/];
-    
-    const lower = word.toLowerCase();
-    
-    // Check suffixes in order of specificity
-    if (ADJ_SUFFIX.some(rx => rx.test(lower))) return 'ADJ';
-    if (ADV_SUFFIX.some(rx => rx.test(lower))) return 'ADV';
-    if (VERB_SUFFIX.some(rx => rx.test(lower))) return 'VERB';
-    if (NOUN_SUFFIX.some(rx => rx.test(lower))) return 'NOUN';
-    
-    // Default fallback
-    return 'NOUN';
-  }
-
-  private normalizeWord(word: string): string {
-    // Simple cleanup only - no lemmatization
-    // This should only be used as a last resort when winkNLP is unavailable
-    return word.replace(/[^\w]/g, '').toLowerCase();
-  }
+  // Helper functions removed - now using centralized posNormalization
 
 
-  private extractNounPhrases(lemmas: string[], pos: string[]): PhraseChunk[] {
-    const chunks: PhraseChunk[] = [];
-    
-    for (let i = 0; i < pos.length; i++) {
-      if (pos[i] === 'NOUN' || pos[i] === 'PROPN') {
-        // Look for NP patterns: (DET|ADJ|PROPN)* (NOUN|PROPN) (ADP (DET|ADJ|PROPN)* (NOUN|PROPN))?
-        let start = i;
-        let end = i;
-        
-        // Look backwards for determiners and adjectives
-        while (start > 0 && (pos[start - 1] === 'DET' || pos[start - 1] === 'ADJ')) {
-          start--;
-        }
-        
-        // Look forwards for prepositional phrases
-        if (i + 1 < pos.length && pos[i + 1] === 'ADP') {
-          end = i + 1;
-          // Look for the object of the preposition
-          while (end + 1 < pos.length && 
-                 (pos[end + 1] === 'DET' || pos[end + 1] === 'ADJ' || pos[end + 1] === 'NOUN' || pos[end + 1] === 'PROPN')) {
-            end++;
-          }
-        }
-        
-        // Only create chunk if it's 3-8 tokens
-        if (end - start + 1 >= 3 && end - start + 1 <= 8) {
-          const chunk = this.createChunk(lemmas, pos, start, end, 'NP');
-          if (chunk) chunks.push(chunk);
-        }
-      }
-    }
-    
-    return chunks;
-  }
-
-  private extractVerbPhrases(lemmas: string[], pos: string[]): PhraseChunk[] {
-    const chunks: PhraseChunk[] = [];
-    
-    for (let i = 0; i < pos.length; i++) {
-      if (pos[i] === 'VERB') {
-        // Look for VP patterns: (AUX)* VERB (ADV)* (PART)? (DET|ADJ|PROPN|NOUN)*
-        let start = i;
-        let end = i;
-        
-        // Look backwards for auxiliaries
-        while (start > 0 && pos[start - 1] === 'AUX') {
-          start--;
-        }
-        
-        // Look forwards for adverbs, particles, and objects
-        while (end + 1 < pos.length && 
-               (pos[end + 1] === 'ADV' || pos[end + 1] === 'PART' || 
-                pos[end + 1] === 'DET' || pos[end + 1] === 'ADJ' || pos[end + 1] === 'NOUN' || pos[end + 1] === 'PROPN')) {
-          end++;
-        }
-        
-        // Only create chunk if it's 3-8 tokens
-        if (end - start + 1 >= 3 && end - start + 1 <= 8) {
-          const chunk = this.createChunk(lemmas, pos, start, end, 'VP');
-          if (chunk) chunks.push(chunk);
-        }
-      }
-    }
-    
-    return chunks;
-  }
-
-  private extractPrepositionalPhrases(lemmas: string[], pos: string[]): PhraseChunk[] {
-    const chunks: PhraseChunk[] = [];
-    
-    for (let i = 0; i < pos.length; i++) {
-      if (pos[i] === 'ADP') {
-        // Look for PP patterns: ADP (DET|ADJ|PROPN)* (NOUN|PROPN)
-        let start = i;
-        let end = i;
-        
-        // Look forwards for the object of the preposition
-        while (end + 1 < pos.length && 
-               (pos[end + 1] === 'DET' || pos[end + 1] === 'ADJ' || pos[end + 1] === 'NOUN' || pos[end + 1] === 'PROPN')) {
-          end++;
-        }
-        
-        // Only create chunk if it's 3-8 tokens and has a noun or proper noun
-        if (end - start + 1 >= 3 && end - start + 1 <= 8 && 
-            (pos.slice(start + 1, end + 1).includes('NOUN') || pos.slice(start + 1, end + 1).includes('PROPN'))) {
-          const chunk = this.createChunk(lemmas, pos, start, end, 'PP');
-          if (chunk) chunks.push(chunk);
-        }
-      }
-    }
-    
-    return chunks;
-  }
+  // Extraction functions removed - now using centralized posNormalization
 
   private extractMeaningfulChunks(lemmas: string[], pos: string[]): PhraseChunk[] {
     const chunks: PhraseChunk[] = [];
@@ -760,53 +409,139 @@ export class NLPAnalyzer {
   }
 }
 
+// Types for the robust POS testing system
+type UPOS =
+  | 'NOUN' | 'VERB' | 'ADJ' | 'ADV' | 'PROPN' | 'ADP' | 'AUX' | 'DET'
+  | 'PRON' | 'PART' | 'CCONJ' | 'SCONJ' | 'NUM' | 'INTJ' | 'SYM' | 'X' | 'PUNCT';
+
+interface AnalyzeResult {
+  tokens: string[];          // surface forms
+  pos: string[];             // UPOS per token
+  lemmas?: string[];         // optional lemma array (recommended)
+}
+
+// --- Robust frames (balanced coverage) ---
+const POLYSEMY_FRAMES: Array<{ id: string; want: UPOS; s: (w: string) => string }> = [
+  // NOUN
+  { id: 'N1', want: 'NOUN', s: w => `The ${w} is ready.` },
+  { id: 'N2', want: 'NOUN', s: w => `That ${w} was helpful.` },
+  { id: 'N3', want: 'NOUN', s: w => `The ${w} of the project was discussed.` },
+
+  // VERB (finite + infinitive + imperative)
+  { id: 'V1', want: 'VERB', s: w => `We will ${w} tomorrow.` },
+  { id: 'V2', want: 'VERB', s: w => `To ${w} takes courage.` },
+  { id: 'V3', want: 'VERB', s: w => `Please ${w} carefully.` },
+
+  // ADJ (predicative & attributive with linkers)
+  { id: 'A1', want: 'ADJ', s: w => `It is very ${w}.` },
+  { id: 'A2', want: 'ADJ', s: w => `The ${w} idea worked.` },
+  { id: 'A3', want: 'ADJ', s: w => `The result seems ${w}.` },
+  { id: 'A4', want: 'ADJ', s: w => `The choice became ${w}.` },
+
+  // ADV (post-verbal manner)
+  { id: 'R1', want: 'ADV', s: w => `They moved ${w}.` },
+  { id: 'R2', want: 'ADV', s: w => `She spoke ${w}.` },
+  { id: 'R3', want: 'ADV', s: w => `He finished ${w}.` },
+];
+
+// --- Anti-frames (down-vote spurious tags) ---
+const POLYSEMY_ANTI_FRAMES: Array<{ id: string; blocks: UPOS; s: (w: string) => string }> = [
+  { id: 'ANTI_V', blocks: 'VERB', s: w => `The very ${w} was approved.` }, // NP slot → verb should not fit
+  { id: 'ANTI_A', blocks: 'ADJ',  s: w => `We will ${w} now.` },           // verb slot → adjective should not fit
+  { id: 'ANTI_R', blocks: 'ADV',  s: w => `The ${w} solution is ready.` }, // attributive slot → adverb should not fit
+  { id: 'ANTI_N', blocks: 'NOUN', s: w => `They will ${w} quickly.` },     // verb slot → noun should not fit
+];
+
+// --- Vote thresholds (tune if needed) ---
+const MIN_VOTES: Partial<Record<UPOS, number>> = {
+  NOUN: 1,
+  VERB: 1,
+  ADJ:  1,
+  ADV:  1,
+};
+
+function normalizeUPOS(tag: string | undefined): UPOS | null {
+  if (!tag) return null;
+  const t = tag.toUpperCase() as UPOS;
+  if (t === 'PUNCT' || t === 'X') return null;
+  return t;
+}
+
+function findTargetIndex(a: AnalyzeResult, word: string): number {
+  const w = word.toLowerCase();
+  // Prefer lemma match
+  if (Array.isArray(a.lemmas)) {
+    const i = a.lemmas.findIndex(l => (l || '').toLowerCase() === w);
+    if (i !== -1) return i;
+  }
+  // Fallback: surface token match
+  return a.tokens.findIndex(t => (t || '').toLowerCase() === w);
+}
+
 /**
  * Test a word in different grammatical contexts to discover all possible POS tags
+ * Uses robust frames with anti-frames, lemma-first matching, and vote thresholds
  */
 export async function testWordInContexts(word: string): Promise<{
   contexts: Array<{sentence: string, pos: string}>;
   uniquePOS: string[];
   isPolysemous: boolean;
 }> {
-  const testSentences = [
-    `The ${word} is here`,           // Noun context
-    `I ${word} the items`,           // Verb context
-    `This is a ${word} solution`,    // Adjective context
-    `He ${word}s carefully`,         // Verb with inflection
-    `The ${word} of knowledge`,      // Noun with preposition
-    `We need to ${word}`,            // Verb infinitive
-    `A big ${word}`,                 // Noun with adjective
-    `The ${word} apple`,             // Adjective before noun
-    `It looks ${word}`,              // Adjective after linking verb
-    `The ${word}ly spoken words`,    // Adverb context (if applicable)
-  ];
-  
-  const results = [];
-  const uniquePOS = new Set<string>();
-  
-  for (const sentence of testSentences) {
+  const results: Array<{ sentence: string; pos: string }> = [];
+  const votes = new Map<UPOS, number>();
+
+  // Helper to add a vote
+  const bump = (p: UPOS) => votes.set(p, (votes.get(p) || 0) + 1);
+  const drop = (p: UPOS) => votes.set(p, Math.max(0, (votes.get(p) || 0) - 1));
+
+  // 1) Run positive frames (up-votes)
+  for (const f of POLYSEMY_FRAMES) {
+    const sentence = f.s(word);
     try {
-      const analysis = await analyzeText(sentence);
-      const wordIndex = analysis.tokens.findIndex(t => 
-        t.toLowerCase() === word.toLowerCase()
-      );
-      
-      if (wordIndex !== -1) {
-        const pos = analysis.pos[wordIndex];
-        results.push({ sentence, pos });
-        uniquePOS.add(pos);
-      }
-    } catch (error) {
-      console.warn(`Failed to analyze sentence: ${sentence}`, error);
+      const analysis = (await analyzeText(sentence)) as AnalyzeResult;
+      const idx = findTargetIndex(analysis, word);
+      if (idx === -1) continue;
+
+      const upos = normalizeUPOS(analysis.pos[idx]);
+      if (!upos) continue;
+
+      results.push({ sentence, pos: upos });
+      bump(upos);
+    } catch (err) {
+      console.warn(`Context test failed: ${f.id}`, err);
     }
   }
-  
+
+  // 2) Run anti-frames (down-votes)
+  for (const af of POLYSEMY_ANTI_FRAMES) {
+    const sentence = af.s(word);
+    try {
+      const analysis = (await analyzeText(sentence)) as AnalyzeResult;
+      const idx = findTargetIndex(analysis, word);
+      if (idx === -1) continue;
+
+      const upos = normalizeUPOS(analysis.pos[idx]);
+      if (!upos) continue;
+
+      results.push({ sentence, pos: upos });
+      if (upos === af.blocks) drop(upos);
+    } catch (err) {
+      console.warn(`Anti-frame failed: ${af.id}`, err);
+    }
+  }
+
+  // 3) Threshold & finalize
+  const uniquePOS = Array.from(votes.entries())
+    .filter(([tag, n]) => n >= (MIN_VOTES[tag] ?? 1))
+    .map(([tag]) => tag);
+
   return {
     contexts: results,
-    uniquePOS: Array.from(uniquePOS),
-    isPolysemous: uniquePOS.size > 1
+    uniquePOS,
+    isPolysemous: uniquePOS.length > 1,
   };
 }
+
 
 // Export singleton instance and convenience functions
 export const nlpAnalyzer = NLPAnalyzer.getInstance();
@@ -815,6 +550,15 @@ export const analyzeText = async (text: string): Promise<AnalysisResult> => nlpA
 export const inferPosPattern = (pos: string[]): string => nlpAnalyzer.inferPosPattern(pos);
 export const extractChunks = (lemmas: string[], pos: string[]): PhraseChunk[] => 
   nlpAnalyzer.extractChunks(lemmas, pos);
+
+// New function that returns the full normalization result
+export const analyze = async (text: string): Promise<NormalizationResult> => {
+  await initializeNLP();
+  const preprocessed = preprocessContractionsPreserveCase(text);
+  const doc = nlp.readDoc(preprocessed);
+  const baseTokens = tagTextToTokens(doc);
+  return normalizePOS(baseTokens);
+};
 
 // NEW: Helper function to infer morphological features from token form
 function inferMorphFromToken(token: string, lemma: string, pos: string): string {

@@ -1,9 +1,9 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { SemanticGraphLite } from '../lib/semanticGraphLite.js';
 import { ingestPhraseText, promoteChunk, ingestBatchPhrases, splitTextIntoPhrases, type BatchIngestionResult } from '../lib/ingest.js';
 import type { PhraseNode, PhraseChunk, WordNode } from '../types/index.js';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext.jsx';
-import TopicChip from './TopicChip.jsx';
+import TopicChip, { type TopicChipRef } from './TopicChip.jsx';
 
 interface IngestViewProps {
   graph: SemanticGraphLite;
@@ -33,6 +33,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
   const [graphUpdateTrigger, setGraphUpdateTrigger] = useState(0);
   
   const { contextFrame, getContextualNodes } = useActiveNodesWithGraph(graph);
+  const topicChipRef = useRef<TopicChipRef>(null);
   
   // Force real-time updates by recomputing contextual data whenever graph changes
   const ctx = useMemo(() => {
@@ -45,7 +46,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
     setGraphUpdateTrigger(prev => prev + 1);
   }, [contextFrame?.topicId, contextFrame?.sessionId]);
 
-  // Helper function to organize words by POS
+  // Helper function to organize words by POS based on potential POS
   const organizeWordsByPOS = (words: WordNode[]) => {
     const organized = {
       nouns: [] as WordNode[],
@@ -56,30 +57,30 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
     };
 
     words.forEach(word => {
-      // Get all POS tags from the word
-      const allPOS = word.pos || [];
+      // Get all potential POS tags from the word
+      const potentialPOS = word.posPotential || [];
       
-      // Add to Multi-POS column if word has multiple POS tags
-      if (allPOS.length > 1) {
+      // Add to Multi-POS column if word has multiple potential POS tags
+      if (potentialPOS.length > 1) {
         organized.multiPOS.push(word);
       }
       
-      // Add to individual POS columns based on what POS tags the word has
-      if (allPOS.includes('NOUN')) {
+      // Add to individual POS columns based on what potential POS tags the word has
+      if (potentialPOS.includes('NOUN')) {
         organized.nouns.push(word);
       }
-      if (allPOS.includes('VERB')) {
+      if (potentialPOS.includes('VERB')) {
         organized.verbs.push(word);
       }
-      if (allPOS.includes('ADJ')) {
+      if (potentialPOS.includes('ADJ')) {
         organized.adjectives.push(word);
       }
-      if (allPOS.includes('ADV')) {
+      if (potentialPOS.includes('ADV')) {
         organized.adverbs.push(word);
       }
       
-      // If word has no POS tags or unknown POS, put in Multi-POS as fallback
-      if (allPOS.length === 0 || !allPOS.some(pos => ['NOUN', 'VERB', 'ADJ', 'ADV'].includes(pos))) {
+      // If word has no potential POS tags or unknown POS, put in Multi-POS as fallback
+      if (potentialPOS.length === 0 || !potentialPOS.some(pos => ['NOUN', 'VERB', 'ADJ', 'ADV'].includes(pos))) {
         organized.multiPOS.push(word);
       }
     });
@@ -113,16 +114,9 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
 
     // Check if we have an active topic session
     if (!contextFrame) {
-      const proceed = confirm('No Topic is active. Start a Topic first?');
-      if (proceed) {
-        const topicText = prompt('Topic / Premise:');
-        if (topicText && topicText.trim()) {
-          // This will be handled by the TopicChip component
-          return;
-        } else {
-          return;
-        }
-      }
+      // Automatically focus on topic entry instead of showing popup
+      topicChipRef.current?.startTopicEntry();
+      return;
     }
 
     try {
@@ -183,7 +177,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
         <p className="text-white/80 mb-4">
           Add multiple phrases to extract words, analyze patterns, and discover chunks. Text is automatically split by sentences and line breaks.
         </p>
-        <TopicChip graph={graph} />
+        <TopicChip ref={topicChipRef} graph={graph} />
       </div>
 
       {/* Input Section */}
@@ -602,7 +596,7 @@ export default function IngestView({ graph, onGraphUpdate, onError }: IngestView
                         <div key={`multiPOS-${word.id}`} className="text-sm bg-orange-50 p-2 rounded">
                           {word.text}
                           <div className="text-xs text-gray-500">
-                            {word.pos?.join(', ')}
+                            {word.posPotential?.join(', ')}
                           </div>
                         </div>
                       ))}

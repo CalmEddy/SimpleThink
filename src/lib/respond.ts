@@ -4,7 +4,7 @@ import { analyzeText } from './nlp.js';
 import { promoteChunk } from './ingest.js';
 import { generatePosPattern, processPropnSpans } from './posNormalization.js';
 import { isStopWord } from './stopWords.js';
-import { analyzePotentialPOS, analyzePotentialPOSWithContext, getPOSGuessSources } from './posHeuristics.js';
+import { analyzeWordPOS } from './posAnalysis.js';
 
 export interface ResponseResult {
   responseNode: ResponseNode;
@@ -43,21 +43,19 @@ export class ResponseEngine {
     // Use centralized PROPN span processing
     const wordMap = new Map<string, string>(); // lemma -> wordId
     
-    const processWordCallback = (token: string, lemma: string, pos: string, morphFeature?: string): string => {
+    const processWordCallback = async (token: string, lemma: string, pos: string, morphFeature?: string): Promise<string> => {
       const normalizedLemma = lemma ? lemma.toLowerCase() : token.toLowerCase();
       
       if (!wordMap.has(normalizedLemma)) {
-        // Use basic POS analysis for synchronous processing
-        const potentialPOS = analyzePotentialPOS(normalizedLemma, pos);
-        const sources = getPOSGuessSources(normalizedLemma, pos);
+        // Use unified POS analysis
+        const analysis = await analyzeWordPOS(normalizedLemma, pos);
         
         // Create word with normalized lemma as both text and lemma
-        const word = graph.upsertWord(normalizedLemma, normalizedLemma, potentialPOS, morphFeature || pos);
+        const word = graph.upsertWord(normalizedLemma, normalizedLemma, analysis.pos, morphFeature || pos);
         
-        // Update the word with POS potential sources if it's a new word
-        if (word.posPotentialSource?.includes('initial')) {
-          word.posPotentialSource = sources;
-        }
+        word.isPolysemousPOS = analysis.isPolysemous;
+        word.posPotential = analysis.pos;
+        word.posPotentialSource = [analysis.source];
         
         wordMap.set(normalizedLemma, word.id);
       } else {
@@ -68,13 +66,17 @@ export class ResponseEngine {
       return wordMap.get(normalizedLemma)!;
     };
 
-    const { wordIds } = processPropnSpans(
-      tokens,
-      lemmas,
-      pos,
-      morphFeatures,
-      processWordCallback
-    );
+    // Process words manually since processPropnSpans doesn't support async callbacks
+    const wordIds: string[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      const lemma = lemmas[i];
+      const posTag = pos[i];
+      const morphFeature = morphFeatures[i];
+      
+      const wordId = await processWordCallback(token, lemma, posTag, morphFeature);
+      wordIds.push(wordId);
+    }
 
     // Compute POS pattern
     const posPattern = generatePosPattern(pos);
