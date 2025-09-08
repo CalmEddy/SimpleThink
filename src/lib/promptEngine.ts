@@ -1,11 +1,12 @@
 import type { SemanticGraphLite } from './semanticGraphLite.js';
-import type { PhraseNode, PromptNode, PromptSlotBinding, UserTemplate, SlotDescriptor, POS, SessionLocks, EphemeralPrompt } from '../types/index.js';
+import type { PhraseNode, PromptNode, PromptSlotBinding, UserTemplate, SlotDescriptor, POS, SessionLocks, EphemeralPrompt, WordNode, MorphFeature } from '../types/index.js';
 import type { ContextualNodeSets } from '../contexts/ActiveNodesContext.js';
 import { TEMPLATES, getRandomWordForSlot } from './templates.js';
 import { surfaceRelatedPhrases } from './retrieve.js';
 import { listSessionTemplates } from './sessionTemplates.js';
 import { getSessionLocks } from './sessionLocks.js';
 import wordBank from './templates.js';
+import { tenseConverter, type MorphologicalType } from './tenseConverter.js';
 
 export interface PromptResult {
   promptText: string;
@@ -27,11 +28,11 @@ export class PromptEngine {
     return PromptEngine.instance;
   }
 
-  buildPromptFromPhrase(
+  async buildPromptFromPhrase(
     phrase: PhraseNode, 
     template: typeof TEMPLATES[0], 
     graph: SemanticGraphLite
-  ): { promptText: string; bindings: PromptSlotBinding[] } {
+  ): Promise<{ promptText: string; bindings: PromptSlotBinding[] }> {
     const bindings: PromptSlotBinding[] = [];
     let promptText = template.text;
 
@@ -39,7 +40,9 @@ export class PromptEngine {
     const phraseWords = this.getWordsFromPhrase(phrase, graph);
     const usedWords = new Set<string>();
 
-    template.slots.forEach((slot, index) => {
+    for (let index = 0; index < template.slots.length; index++) {
+      const slot = template.slots[index];
+      
       // Try to find a word in the phrase that matches this slot
       const matchingWord = phraseWords.find(word => 
         word.pos.includes(slot) && !usedWords.has(word.id)
@@ -51,7 +54,14 @@ export class PromptEngine {
           fillerNodeId: matchingWord.id,
         });
         usedWords.add(matchingWord.id);
-        promptText = promptText.replace(`[${slot}]`, matchingWord.text);
+        
+        // Handle morphological conversion
+        const { basePos, morph } = this.parseMorphSpecifier(slot);
+        let wordText = matchingWord.text;
+        if (morph) {
+          wordText = await this.convertWordToMorph(matchingWord, basePos, morph);
+        }
+        promptText = promptText.replace(`[${slot}]`, wordText);
       } else {
         // Try to find from related phrases
         const relatedWord = this.findWordFromRelatedPhrases(phrase, slot, graph, usedWords);
@@ -62,7 +72,14 @@ export class PromptEngine {
             fillerNodeId: relatedWord.id,
           });
           usedWords.add(relatedWord.id);
-          promptText = promptText.replace(`[${slot}]`, relatedWord.text);
+          
+          // Handle morphological conversion
+          const { basePos, morph } = this.parseMorphSpecifier(slot);
+          let wordText = relatedWord.text;
+          if (morph) {
+            wordText = await this.convertWordToMorph(relatedWord, basePos, morph);
+          }
+          promptText = promptText.replace(`[${slot}]`, wordText);
         } else {
           // Fall back to word bank
           const fallbackWord = this.getFallbackWord(slot, graph);
@@ -70,10 +87,17 @@ export class PromptEngine {
             slot,
             fillerNodeId: fallbackWord.id,
           });
-          promptText = promptText.replace(`[${slot}]`, fallbackWord.text);
+          
+          // Handle morphological conversion
+          const { basePos, morph } = this.parseMorphSpecifier(slot);
+          let wordText = fallbackWord.text;
+          if (morph) {
+            wordText = await this.convertWordToMorph(fallbackWord, basePos, morph);
+          }
+          promptText = promptText.replace(`[${slot}]`, wordText);
         }
       }
-    });
+    }
 
     return { promptText, bindings };
   }
@@ -87,12 +111,12 @@ export class PromptEngine {
     return graph.recordPrompt(templateId, templateText, bindings);
   }
 
-  createPromptFromPhrase(
+  async createPromptFromPhrase(
     phrase: PhraseNode,
     template: typeof TEMPLATES[0],
     graph: SemanticGraphLite
-  ): PromptResult {
-    const { promptText, bindings } = this.buildPromptFromPhrase(phrase, template, graph);
+  ): Promise<PromptResult> {
+    const { promptText, bindings } = await this.buildPromptFromPhrase(phrase, template, graph);
     const promptNode = this.recordPromptAndReturnNode(template.id, promptText, bindings, graph);
 
     return {
@@ -142,17 +166,15 @@ export class PromptEngine {
   }
 
   private getFallbackWord(slot: string, graph: SemanticGraphLite): any {
-    // Try to find existing word in graph first
+    // FIRST: Try word bank (controlled vocabulary)
+    const wordText = getRandomWordForSlot(slot);
+    const wordBankWord = graph.upsertWord(wordText, wordText.toLowerCase(), [slot]);
+    
+    // SECOND: Fall back to existing graph words only if word bank fails
     const existingWords = graph.getNodesByType('WORD');
     const matchingWord = existingWords.find(word => word.pos.includes(slot));
     
-    if (matchingWord) {
-      return matchingWord;
-    }
-
-    // Create new word from word bank
-    const wordText = getRandomWordForSlot(slot);
-    return graph.upsertWord(wordText, wordText.toLowerCase(), [slot]);
+    return matchingWord || wordBankWord;
   }
 
   // Get available templates for a phrase based on its POS pattern
@@ -186,22 +208,41 @@ export class PromptEngine {
 
     return suggestions;
   }
+
+  /**
+   * Parse morphological specifier from slot string
+   */
+  parseMorphSpecifier(slot: string): { basePos: string; morph?: string } {
+    if (slot.includes(':')) {
+      const [basePos, morph] = slot.split(':');
+      return { basePos, morph };
+    }
+    return { basePos: slot };
+  }
+
+  /**
+   * Convert word to morphological form
+   */
+  async convertWordToMorph(word: WordNode, basePos: string, morph: string): Promise<string> {
+    const morphType = morph as MorphologicalType;
+    return await tenseConverter.convertWord(word.lemma, basePos, morphType);
+  }
 }
 
 // Export singleton instance and convenience functions
 export const promptEngine = PromptEngine.getInstance();
 
-export const buildPromptFromPhrase = (
+export const buildPromptFromPhrase = async (
   phrase: PhraseNode,
   template: typeof TEMPLATES[0],
   graph: SemanticGraphLite
-) => promptEngine.buildPromptFromPhrase(phrase, template, graph);
+) => await promptEngine.buildPromptFromPhrase(phrase, template, graph);
 
-export const createPromptFromPhrase = (
+export const createPromptFromPhrase = async (
   phrase: PhraseNode,
   template: typeof TEMPLATES[0],
   graph: SemanticGraphLite
-) => promptEngine.createPromptFromPhrase(phrase, template, graph);
+) => await promptEngine.createPromptFromPhrase(phrase, template, graph);
 
 // NEW: Enhanced Template system functions
 
@@ -213,14 +254,104 @@ export function posPatternToSlots(pattern: string): SlotDescriptor[] {
   });
 }
 
+// Parse template text to extract slots with proper morphological and numbering support
+export function parseTemplateText(templateText: string): SlotDescriptor[] {
+  const slots: SlotDescriptor[] = [];
+  
+  // Handle both individual slots [VERB] [ADJ] [NOUN] and dash-separated [VERB-ADJ-NOUN]
+  if (templateText.includes('[') && templateText.includes(']')) {
+    // Extract content between brackets
+    const bracketMatch = templateText.match(/\[([^\]]+)\]/);
+    if (bracketMatch) {
+      const content = bracketMatch[1];
+      
+      // Check if it's dash-separated (like VERB:past-ADJ-NOUN)
+      if (content.includes('-')) {
+        const parts = content.split('-').map(s => s.trim());
+        return parts.map(part => parseSlotPart(part));
+      } else {
+        // Single slot
+        return [parseSlotPart(content)];
+      }
+    }
+  }
+  
+  // Fallback: treat as space-separated individual slots
+  const spaceSeparated = templateText.split(/\s+/).filter(s => s.length > 0);
+  return spaceSeparated.map(part => parseSlotPart(part));
+}
+
+// Parse individual slot part (e.g., "VERB:past", "VERB1", "ADJ:comparative", "VERB1:past")
+function parseSlotPart(part: string): SlotDescriptor {
+  // Remove brackets if present
+  const cleanPart = part.replace(/[\[\]]/g, '');
+  const raw = cleanPart; // Preserve original for debugging/validation
+  
+  // Check for combined numbering and morphology (e.g., VERB1:past, NOUN2:plural)
+  const combinedMatch = cleanPart.match(/^([A-Z]+)(\d+):(.+)$/);
+  if (combinedMatch) {
+    const [, pos, index, morph] = combinedMatch;
+    return { 
+      kind: 'slot', 
+      pos: pos as POS, 
+      index: parseInt(index),
+      morph: morph as MorphFeature,
+      raw
+    };
+  }
+  
+  // Check for numbering only (e.g., VERB1, NOUN2)
+  const numberMatch = cleanPart.match(/^([A-Z]+)(\d+)$/);
+  if (numberMatch) {
+    const [, pos, index] = numberMatch;
+    return { 
+      kind: 'slot', 
+      pos: pos as POS, 
+      index: parseInt(index),
+      raw
+    };
+  }
+  
+  // Check for morphological specifier only (e.g., VERB:past, ADJ:comparative)
+  if (cleanPart.includes(':')) {
+    const [basePos, morph] = cleanPart.split(':');
+    return { 
+      kind: 'slot', 
+      pos: basePos as POS,
+      morph: morph as MorphFeature,
+      raw
+    };
+  }
+  
+  // Regular POS tag
+  return { 
+    kind: 'slot', 
+    pos: cleanPart as POS,
+    raw
+  };
+}
+
+// Create a UserTemplate from template text input
+export function createTemplateFromText(templateText: string, sessionId: string, baseText?: string): UserTemplate {
+  const slots = parseTemplateText(templateText);
+  const id = `custom:${Date.now()}`;
+  
+  return {
+    id,
+    text: templateText,
+    slots,
+    createdInSessionId: sessionId,
+    baseText, // ✅ keep the original phrase text when provided
+  };
+}
+
 // Build available templates: context phrases -> POS templates, context chunks -> chunk templates, plus user session templates
 export function getAvailableTemplates(ctx: ContextualNodeSets, sessionId: string): UserTemplate[] {
   const userTpls = listSessionTemplates(sessionId);
   const phraseTpls: UserTemplate[] = ctx.phrases.map(p => ({
     id: `phrase:${p.id}`,
     text: `[${p.posPattern.replace(/-/g, ' ')}]`,
-    slots: posPatternToSlots(p.posPattern),
-    source: 'phrase',
+    slots: parseTemplateText(`[${p.posPattern.replace(/-/g, ' ')}]`),
     createdInSessionId: sessionId,
     baseText: p.text,  // Add base text for phrase templates
   }));
@@ -228,7 +359,6 @@ export function getAvailableTemplates(ctx: ContextualNodeSets, sessionId: string
     id: `chunk:${c.id}`,
     text: `[${c.posPattern}]`,
     slots: [{ kind: 'chunk', pos: 'NOUN', chunkPattern: c.posPattern }],
-    source: 'chunk',
     createdInSessionId: sessionId,
   }));
   const merged = new Map<string, UserTemplate>();
@@ -255,42 +385,99 @@ function parseMorphSpecifier(pos: string): { basePos: string; morph?: string } {
   return { basePos: pos };
 }
 
+// --- Morph helpers ----
+
+/**
+ * Tokenize base text into words for overlay
+ */
+function tokenizeBaseText(s: string): string[] {
+  // Keep this simple; your pipeline already aligns POS↔words on phrases.
+  // If you have a better tokenizer in the codebase, use it instead.
+  return s.trim().split(/\s+/);
+}
+
+
+/**
+ * Produce a "selection view" of slots that strips morphology (base POS only)
+ * plus a parallel array mapping slotIndex -> morph feature.
+ * This lets us keep your existing selection logic 100% intact.
+ */
+function normalizeSlotsForSelection(slots: SlotDescriptor[]) {
+  const selectionSlots: SlotDescriptor[] = slots.map((s) => ({
+    ...s,
+    // IMPORTANT: selection happens by BASE POS only
+    pos: s.pos,
+    // Do not pass morph to selection logic
+    morph: undefined,
+  }));
+
+  const morphBySlot: (MorphFeature | null)[] = slots.map((s) => s.morph ?? null);
+  return { selectionSlots, morphBySlot };
+}
+
+/**
+ * Apply morphology to a single token (if requested and applicable).
+ * Safe no-op if morph is null or converter can't transform.
+ */
+async function applyMorphIfNeeded(
+  surface: string,
+  lemma: string | undefined,
+  basePos: string,
+  morph: MorphFeature | null
+): Promise<string> {
+  if (!morph || morph === 'base') return surface;
+  // Prefer lemma when available; fall back to surface for regular forms.
+  const seed = lemma && lemma.length ? lemma : surface;
+  try {
+    const converted = await tenseConverter.convertWord(seed, basePos, morph as MorphologicalType);
+    // Keep capitalization if the original token was capitalized (sentence start, etc.)
+    if (!converted || converted === seed) return surface;
+
+    const isCapitalized = /^[A-Z]/.test(surface);
+    return isCapitalized ? converted.charAt(0).toUpperCase() + converted.slice(1) : converted;
+  } catch {
+    return surface;
+  }
+}
+
 // Fill a single template randomly, enforcing POS, locks first, then ctx, then bank.
-export function fillTemplateSlotsRandom(
+export async function fillTemplateSlotsRandom(
   tpl: UserTemplate,
   ctx: ContextualNodeSets,
   locks: SessionLocks,
   rng: () => number
-): { text: string; bindings: EphemeralPrompt['bindings']; templateSignature: string } | null {
+): Promise<{ text: string; bindings: EphemeralPrompt['bindings']; templateSignature: string } | null> {
   const bindings: EphemeralPrompt['bindings'] = [];
-  
-  // Get base text if this is a phrase template
-  let baseWords: string[] = [];
-  if (tpl.source === 'phrase' && tpl.baseText) {
-    baseWords = tpl.baseText.split(/\s+/);
-  }
+  const renderedTokens: string[] = [];
 
   // Index ctx words by POS
   const wordsByPOS = new Map<POS, any[]>();
-  const POS_ALL: POS[] = ['NOUN','VERB','VERB:participle','VERB:past','VERB:present_3rd','ADJ','ADJ:comparative','ADJ:superlative','ADV','ADP','DET','PRON','PROPN','AUX'];
+  const POS_ALL: POS[] = ['NOUN','VERB','VERB:participle','VERB:past','VERB:present_3rd','ADJ','ADJ:comparative','ADJ:superlative','ADV','ADP','DET','PRON','PROPN','AUX','CCONJ'];
   POS_ALL.forEach(pos => wordsByPOS.set(pos, ctx.words.filter(w => w.pos?.includes(pos))));
-
+  
   const pick = <T,>(arr: T[]) => (arr.length ? arr[Math.floor(rng() * arr.length)] : undefined);
 
   // Only memoize explicitly numbered slots
   const chosenByKey = new Map<string, { nodeId?: string; bank?: string }>();
 
+  // Get base words if this template came from a phrase
+  const baseWords = tpl.baseText ? tokenizeBaseText(tpl.baseText) : [];
+  let baseWordIndex = 0;
+
+  // Build prompt left to right, one word at a time
   for (let i = 0; i < tpl.slots.length; i++) {
     const slot = tpl.slots[i];
     
     if (slot.kind === 'chunk') {
-      // Handle chunk slots (unchanged)
+      // Handle chunk slots
       const locked = new Set(locks.lockedChunkIds ?? []);
       const candidates = ctx.chunks.filter(c => c.posPattern === slot.chunkPattern);
       const lockedFirst = candidates.filter(c => locked.has(c.id)).concat(candidates.filter(c => !locked.has(c.id)));
       const chosen = pick(lockedFirst);
+
       if (!chosen) return null;
       bindings.push({ slot, nodeId: chosen.id });
+      renderedTokens.push(chosen.text);
       continue;
     }
 
@@ -299,111 +486,116 @@ export function fillTemplateSlotsRandom(
     
     // Check if we already chose this numbered slot
     if (key && chosenByKey.has(key)) {
-      bindings.push({ slot, ...chosenByKey.get(key)! });
-      continue;
-    }
-
-    // For unnumbered slots, try base text first
-    if (slot.index === undefined && baseWords.length > i) {
-      const baseWord = baseWords[i];
-      
-      // Try to find word with matching morphological feature
-      const { basePos, morph } = parseMorphSpecifier(slot.pos);
-      if (morph) {
-        const morphWord = ctx.words.find(w => 
-          w.lemma === baseWord && w.morphFeature === morph
-        );
-        if (morphWord) {
-          bindings.push({ slot, nodeId: morphWord.id });
-          continue;
-        }
-      }
-      
-      // Fall back to regular base word
-      bindings.push({ slot, nodeId: 'base', bank: baseWord });
-      continue;
-    }
-
-    // For numbered slots or when no base text available, randomize
-    const lockedSet = new Set(locks.lockedWordIds ?? []);
-
-    // Enhanced word finding with morphological matching
-    const findWordByMorph = (pos: string) => {
-      const { basePos, morph } = parseMorphSpecifier(pos);
-      
-      if (morph) {
-        // Try to find word with matching morphological feature
-        const morphWord = ctx.words.find(w => 
-          w.pos?.includes(basePos) && w.morphFeature === morph
-        );
-        if (morphWord) return morphWord;
-      }
-      
-      // Fall back to regular matching
-      return ctx.words.find(w => w.pos?.includes(basePos));
-    };
-
-    // 1) Try locked words first
-    const lockedPool = wordsByPOS.get(slot.pos)!.filter(w => lockedSet.has(w.id));
-    let chosenWord = pick(lockedPool);
-
-    // 2) Try context words with morphological matching
-    if (!chosenWord) {
-      const morphWord = findWordByMorph(slot.pos);
-      if (morphWord) {
-        chosenWord = morphWord;
-      } else {
-        // Fall back to regular context words
-        const ctxPool = wordsByPOS.get(slot.pos)!;
-        chosenWord = pick(ctxPool);
-      }
-    }
-
-    // 3) Fall back to word bank
-    if (!chosenWord) {
-      const bank = (wordBank[slot.pos] ?? []);
-      const chosenLemma = pick(bank);
-      if (!chosenLemma) return null;
-      const chosen = { bank: chosenLemma };
-      if (key) chosenByKey.set(key, chosen);
+      const chosen = chosenByKey.get(key)!;
       bindings.push({ slot, ...chosen });
+      
+      // Render the previously chosen word
+      if (chosen.nodeId) {
+        const w = ctx.words.find(x => x.id === chosen.nodeId);
+        if (w) {
+          const { morph } = parseMorphSpecifier(slot.pos);
+          const surface = w.lemma || w.text;
+          if (morph) {
+            const rendered = await applyMorphIfNeeded(surface, w.lemma, slot.pos, morph);
+            renderedTokens.push(rendered);
+          } else {
+            renderedTokens.push(surface);
+          }
+        } else {
+          renderedTokens.push('');
+        }
+      } else {
+        renderedTokens.push(chosen.bank ?? '');
+      }
       continue;
     }
 
-    const chosen = { nodeId: chosenWord.id };
-    if (key) chosenByKey.set(key, chosen);
-    bindings.push({ slot, ...chosen });
+    // For unnumbered slots with baseText, use the original phrase word
+    // For numbered slots or slots without baseText, randomize
+    let chosenWord: any = null;
+    let chosenBank: string | undefined = undefined;
+
+    if (slot.index == null && tpl.baseText && baseWordIndex < baseWords.length) {
+      // Use original phrase word for unnumbered slots
+      const baseWord = baseWords[baseWordIndex];
+      baseWordIndex++;
+      
+      // Find a word in context that matches this base word and POS
+      const { basePos } = parseMorphSpecifier(slot.pos);
+      chosenWord = ctx.words.find(w => 
+        w.text.toLowerCase() === baseWord.toLowerCase() && 
+        w.pos?.includes(basePos)
+      );
+      
+      // If no exact match, use the base word as-is (will be added to word bank)
+      if (!chosenWord) {
+        chosenBank = baseWord;
+      }
+    } else {
+      // Randomize from context/word bank
+      const lockedSet = new Set(locks.lockedWordIds ?? []);
+      const { basePos } = parseMorphSpecifier(slot.pos);
+      
+      // 1) Try locked words first
+      const lockedPool = wordsByPOS.get(basePos as POS)?.filter(w => lockedSet.has(w.id)) || [];
+      chosenWord = pick(lockedPool);
+
+      // 2) Try context words
+      if (!chosenWord) {
+        const candidates = ctx.words.filter(w => w.pos?.includes(basePos));
+        chosenWord = pick(candidates);
+      }
+
+      // 3) Fall back to word bank
+      if (!chosenWord) {
+        const bank = (wordBank[basePos as POS] ?? []);
+        chosenBank = pick(bank);
+        if (!chosenBank) return null;
+      }
+    }
+
+    // Store the choice for numbered slots
+    if (key) {
+      const chosen = chosenWord ? { nodeId: chosenWord.id } : { bank: chosenBank };
+      chosenByKey.set(key, chosen);
+    }
+
+    // Add to bindings
+    if (chosenWord) {
+      bindings.push({ slot, nodeId: chosenWord.id });
+    } else {
+      bindings.push({ slot, bank: chosenBank });
+    }
+
+    // Render the word
+    if (chosenWord) {
+      const { morph } = parseMorphSpecifier(slot.pos);
+      const surface = chosenWord.lemma || chosenWord.text;
+      if (morph) {
+        const rendered = await applyMorphIfNeeded(surface, chosenWord.lemma, slot.pos, morph);
+        renderedTokens.push(rendered);
+      } else {
+        renderedTokens.push(surface);
+      }
+    } else {
+      renderedTokens.push(chosenBank ?? '');
+    }
   }
 
-  // Render final text
-  const out = bindings.map(b => {
-    if (b.slot.kind === 'chunk') {
-      const ch = ctx.chunks.find(x => x.id === b.nodeId);
-      return ch?.text ?? '';
-    }
-    if (b.nodeId === 'base') {
-      return b.bank ?? '';
-    }
-    if (b.nodeId) {
-      const w = ctx.words.find(x => x.id === b.nodeId);
-      return w?.lemma ?? '';
-    }
-    return b.bank ?? '';
-  }).join(' ').trim();
-
-  const rendered = out ? out[0].toUpperCase() + out.slice(1) : '';
+  const finalText = renderedTokens.join(' ').trim();
+  const rendered = finalText ? finalText[0].toUpperCase() + finalText.slice(1) : '';
   const signature = tpl.slots.map(s => s.kind === 'chunk' ? (s.chunkPattern ?? '') : `${s.pos}${s.index ?? ''}`).join('-');
   return { text: rendered, bindings, templateSignature: signature };
 }
 
 // Generate multiple ephemeral prompts (no storage). Respects locked templates first.
-export function generateEphemeralPrompts(
+export async function generateEphemeralPrompts(
   graph: any, // keep generic to avoid tight coupling here
   ctx: ContextualNodeSets,
   sessionId: string,
   count = 20,
   seed?: number
-): EphemeralPrompt[] {
+): Promise<EphemeralPrompt[]> {
   const rng = mulberry32(seed ?? Math.floor(Math.random() * 1e9));
   const templates = getAvailableTemplates(ctx, sessionId);
   const locks = getSessionLocks(graph, sessionId);
@@ -421,7 +613,7 @@ export function generateEphemeralPrompts(
     const tpl = ordered[Math.floor(rng() * ordered.length)];
     if (!tpl) break;
 
-    const filled = fillTemplateSlotsRandom(tpl, ctx, locks, rng);
+    const filled = await fillTemplateSlotsRandom(tpl, ctx, locks, rng);
     if (!filled) { continue; }
 
     // basic dedupe: avoid identical text within this burst

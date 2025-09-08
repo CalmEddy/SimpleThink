@@ -33,7 +33,7 @@ export default function PromptView({ graph, onGraphUpdate, onError }: PromptView
 
     try {
       setIsSubmitting(true);
-      const result = recordResponse(selectedPrompt.id, responseText.trim(), graph);
+      const result = await recordResponse(selectedPrompt.id, responseText.trim(), graph);
       setLastResponse(result.responseNode);
       setResponseText('');
       onGraphUpdate();

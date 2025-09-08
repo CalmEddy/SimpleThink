@@ -575,3 +575,66 @@ function inferMorphFromToken(token: string, lemma: string, pos: string): string 
   }
   return 'base';
 }
+
+// Helper function for composer to analyze text with full POS pipeline
+export async function analyzeTextForComposer(text: string): Promise<{
+  start: number;
+  end: number;
+  text: string;
+  lemma: string;
+  pos: string;
+  posSet: string[];
+}[]> {
+  try {
+    // Ensure NLP is initialized
+    await initializeNLP();
+    if (!nlp) {
+      throw new Error('NLP not initialized');
+    }
+
+    // Create document and extract tokens
+    const doc = nlp.readDoc(text);
+    const baseTokens = tagTextToTokens(doc);
+    
+    // Normalize POS tags
+    const normalizedResult = normalizePOS(baseTokens);
+    
+    // Convert to composer format
+    return normalizedResult.tokens.map((token) => ({
+      start: token.index,
+      end: token.index + token.value.length,
+      text: token.value,
+      lemma: token.lemma,
+      pos: token.pos,
+      posSet: guessPOSSetForWord(token.value, token.pos)
+    }));
+  } catch (error) {
+    console.warn('[NLP] Failed to analyze text for composer:', error);
+    throw error;
+  }
+}
+
+// Helper to guess POS set for a word (similar to composer's guessPOSSet but with more context)
+function guessPOSSetForWord(word: string, currentPos: string): string[] {
+  const lower = word.toLowerCase();
+  const set = new Set<string>();
+  
+  // Always include the current POS
+  set.add(currentPos);
+  
+  // Add common alternatives based on word patterns
+  if (/ly$/.test(lower)) set.add('ADV');
+  if (/ing$|ed$/.test(lower)) set.add('VERB');
+  if (/ous$|ful$|able$|ible$|al$|ic$|ive$|less$|y$/.test(lower)) set.add('ADJ');
+  if (['the','a','an','this','that','these','those'].includes(lower)) set.add('DET');
+  if (['and','or','but','nor','yet','so'].includes(lower)) set.add('CCONJ');
+  if (['in','on','at','with','by','to','from','for','of','over','under'].includes(lower)) set.add('ADP');
+  if (/^[A-Z]/.test(word)) set.add('PROPN');
+  
+  // Default to NOUN if no other patterns match
+  if (set.size === 1 && set.has(currentPos)) {
+    set.add('NOUN');
+  }
+  
+  return Array.from(set);
+}

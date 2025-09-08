@@ -25,6 +25,8 @@ const its = () => nlp.its;
 
 export type TenseType = 'base' | 'past' | 'participle' | 'present_3rd';
 
+export type MorphologicalType = 'base' | 'past' | 'participle' | 'present_3rd' | 'comparative' | 'superlative' | 'plural';
+
 export class TenseConverter {
   private static instance: TenseConverter;
   
@@ -71,11 +73,271 @@ export class TenseConverter {
     }
   }
 
+  /**
+   * Convert a word to the specified morphological form
+   */
+  async convertWord(lemma: string, pos: string, targetMorph: MorphologicalType): Promise<string> {
+    try {
+      await initializeNLP();
+    } catch (error) {
+      console.warn('winkNLP not available, using fallback rules:', error);
+      return this.getFallbackMorph(lemma, pos, targetMorph);
+    }
+
+    try {
+      // Create context sentence based on POS
+      const contextSentence = this.createContextSentence(lemma, pos);
+      const doc = nlp.readDoc(contextSentence);
+      
+      // Find the token by lemma
+      const token = this.findTokenByLemma(doc, lemma);
+      if (!token) {
+        console.warn(`Token not found for lemma "${lemma}", using fallback`);
+        return this.getFallbackMorph(lemma, pos, targetMorph);
+      }
+      
+      // Get morphological form
+      const morphForm = await this.getMorphologicalForm(token, lemma, pos, targetMorph);
+      return morphForm;
+    } catch (error) {
+      console.warn(`Morphological conversion failed for "${lemma}" (${pos}) to ${targetMorph}:`, error);
+      return this.getFallbackMorph(lemma, pos, targetMorph);
+    }
+  }
+
+  /**
+   * Create a context sentence for morphological analysis
+   */
+  private createContextSentence(lemma: string, pos: string): string {
+    switch (pos) {
+      case 'VERB':
+        return `I ${lemma} the ball`;
+      case 'ADJ':
+        return `The ${lemma} cat`;
+      case 'NOUN':
+        return `The ${lemma} is here`;
+      case 'ADV':
+        return `I run ${lemma}`;
+      default:
+        return `The ${lemma} word`;
+    }
+  }
+
+  /**
+   * Find token by lemma in document
+   */
+  private findTokenByLemma(doc: any, lemma: string): any {
+    const tokens = doc.tokens();
+    if (!tokens || !tokens.filter) {
+      return null;
+    }
+    const filtered = tokens.filter((t: any) => t.out(its().lemma) === lemma);
+    return filtered && filtered.length > 0 ? filtered[0] : null;
+  }
+
+  /**
+   * Get morphological form from token
+   */
+  private async getMorphologicalForm(token: any, lemma: string, pos: string, targetMorph: MorphologicalType): Promise<string> {
+    try {
+      const morph = token.out(its().morph);
+      
+      // Check if token already has the target morphological feature
+      if (this.hasTargetMorph(morph, targetMorph)) {
+        return token.out(its().value);
+      }
+    } catch (error) {
+      console.warn('Error getting morphological features from winkNLP:', error);
+    }
+    
+    // For adjectives, try comparative/superlative conversion
+    if (pos === 'ADJ' && (targetMorph === 'comparative' || targetMorph === 'superlative')) {
+      return this.convertAdjective(lemma, targetMorph);
+    }
+    
+    // For verbs, use existing tense conversion
+    if (pos === 'VERB' && ['past', 'participle', 'present_3rd'].includes(targetMorph)) {
+      return await this.convertVerb(lemma, targetMorph as TenseType);
+    }
+    
+    // For nouns, try plural conversion
+    if (pos === 'NOUN' && targetMorph === 'plural') {
+      return this.convertNounToPlural(lemma);
+    }
+    
+    return lemma;
+  }
+
+  /**
+   * Check if morphological features contain target form
+   */
+  private hasTargetMorph(morph: string, targetMorph: MorphologicalType): boolean {
+    if (!morph) return false;
+    
+    switch (targetMorph) {
+      case 'past':
+        return morph.includes('past');
+      case 'participle':
+        return morph.includes('participle');
+      case 'present_3rd':
+        return morph.includes('present_3rd');
+      case 'comparative':
+        return morph.includes('comparative');
+      case 'superlative':
+        return morph.includes('superlative');
+      case 'plural':
+        return morph.includes('plural');
+      case 'base':
+      default:
+        return true;
+    }
+  }
+
+  /**
+   * Convert adjective to comparative or superlative
+   */
+  private convertAdjective(lemma: string, targetMorph: MorphologicalType): string {
+    if (targetMorph === 'comparative') {
+      return this.simpleComparative(lemma);
+    } else if (targetMorph === 'superlative') {
+      return this.simpleSuperlative(lemma);
+    }
+    return lemma;
+  }
+
+  /**
+   * Simple comparative form generation
+   */
+  private simpleComparative(lemma: string): string {
+    // Handle irregular adjectives
+    const irregulars: Record<string, string> = {
+      'good': 'better',
+      'bad': 'worse',
+      'far': 'farther',
+      'little': 'less',
+      'many': 'more',
+      'much': 'more'
+    };
+
+    if (irregulars[lemma]) {
+      return irregulars[lemma];
+    }
+
+    // Regular rules
+    if (lemma.endsWith('y') && !/[aeiou]y$/.test(lemma)) {
+      return lemma.slice(0, -1) + 'ier';
+    }
+    if (lemma.endsWith('e')) {
+      return lemma + 'r';
+    }
+    if (lemma.length > 2 && !lemma.endsWith('er')) {
+      return lemma + 'er';
+    }
+    return lemma;
+  }
+
+  /**
+   * Simple superlative form generation
+   */
+  private simpleSuperlative(lemma: string): string {
+    // Handle irregular adjectives
+    const irregulars: Record<string, string> = {
+      'good': 'best',
+      'bad': 'worst',
+      'far': 'farthest',
+      'little': 'least',
+      'many': 'most',
+      'much': 'most'
+    };
+
+    if (irregulars[lemma]) {
+      return irregulars[lemma];
+    }
+
+    // Regular rules
+    if (lemma.endsWith('y') && !/[aeiou]y$/.test(lemma)) {
+      return lemma.slice(0, -1) + 'iest';
+    }
+    if (lemma.endsWith('e')) {
+      return lemma + 'st';
+    }
+    if (lemma.length > 2 && !lemma.endsWith('est')) {
+      return lemma + 'est';
+    }
+    return lemma;
+  }
+
+  /**
+   * Convert noun to plural form
+   */
+  private convertNounToPlural(lemma: string): string {
+    // Handle irregular plurals
+    const irregulars: Record<string, string> = {
+      'child': 'children',
+      'man': 'men',
+      'woman': 'women',
+      'person': 'people',
+      'foot': 'feet',
+      'tooth': 'teeth',
+      'mouse': 'mice',
+      'goose': 'geese',
+      'ox': 'oxen',
+      'sheep': 'sheep',
+      'deer': 'deer',
+      'fish': 'fish',
+      'moose': 'moose',
+      'series': 'series',
+      'species': 'species'
+    };
+
+    if (irregulars[lemma]) {
+      return irregulars[lemma];
+    }
+
+    // Regular plural rules
+    if (lemma.endsWith('y') && !/[aeiou]y$/.test(lemma)) {
+      return lemma.slice(0, -1) + 'ies';
+    }
+    if (lemma.endsWith('s') || lemma.endsWith('sh') || lemma.endsWith('ch') || lemma.endsWith('x') || lemma.endsWith('z')) {
+      return lemma + 'es';
+    }
+    if (lemma.endsWith('f')) {
+      return lemma.slice(0, -1) + 'ves';
+    }
+    if (lemma.endsWith('fe')) {
+      return lemma.slice(0, -2) + 'ves';
+    }
+    return lemma + 's';
+  }
+
+  /**
+   * Fallback morphological conversion
+   */
+  private getFallbackMorph(lemma: string, pos: string, targetMorph: MorphologicalType): string {
+    if (pos === 'ADJ' && (targetMorph === 'comparative' || targetMorph === 'superlative')) {
+      return this.convertAdjective(lemma, targetMorph);
+    }
+    
+    if (pos === 'VERB' && ['past', 'participle', 'present_3rd'].includes(targetMorph)) {
+      return this.getFallbackTense(lemma, targetMorph as TenseType);
+    }
+    
+    if (pos === 'NOUN' && targetMorph === 'plural') {
+      return this.convertNounToPlural(lemma);
+    }
+    
+    return lemma;
+  }
+
   private getPastTense(verb: any, lemma: string): string {
-    // Try to get past tense from winkNLP
-    const morph = verb.out(its().morph);
-    if (morph && morph.includes('past')) {
-      return verb.out(its().value);
+    try {
+      // Try to get past tense from winkNLP
+      const morph = verb.out(its().morph);
+      if (morph && morph.includes('past')) {
+        return verb.out(its().value);
+      }
+    } catch (error) {
+      console.warn('Error getting past tense from winkNLP:', error);
     }
     
     // Fallback: simple rule-based conversion
@@ -83,9 +345,13 @@ export class TenseConverter {
   }
 
   private getParticiple(verb: any, lemma: string): string {
-    const morph = verb.out(its().morph);
-    if (morph && morph.includes('participle')) {
-      return verb.out(its().value);
+    try {
+      const morph = verb.out(its().morph);
+      if (morph && morph.includes('participle')) {
+        return verb.out(its().value);
+      }
+    } catch (error) {
+      console.warn('Error getting participle from winkNLP:', error);
     }
     
     // Fallback: simple rule-based conversion
@@ -93,9 +359,13 @@ export class TenseConverter {
   }
 
   private getPresent3rd(verb: any, lemma: string): string {
-    const morph = verb.out(its().morph);
-    if (morph && morph.includes('present_3rd')) {
-      return verb.out(its().value);
+    try {
+      const morph = verb.out(its().morph);
+      if (morph && morph.includes('present_3rd')) {
+        return verb.out(its().value);
+      }
+    } catch (error) {
+      console.warn('Error getting present_3rd from winkNLP:', error);
     }
     
     // Fallback: simple rule-based conversion

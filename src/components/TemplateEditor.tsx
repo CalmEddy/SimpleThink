@@ -2,7 +2,9 @@ import { useMemo, useState, useEffect, useRef } from 'react';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext';
 import { SlotDescriptor, POS } from '../types/index.js';
 import { addSessionTemplate, updateSessionTemplate, removeSessionTemplate, listSessionTemplates } from '../lib/sessionTemplates.js';
+import { createTemplateFromText, fillTemplateSlotsRandom } from '../lib/promptEngine.js';
 import type { SemanticGraphLite } from '../lib/semanticGraphLite.js';
+import ComposerEditor from './ComposerEditor';
 
 type Props = { sessionId: string; onClose?: () => void; graph: SemanticGraphLite };
 
@@ -15,11 +17,14 @@ const POS_ORDER: POS[] = [
 
 export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
   const { ctx } = useActiveNodesWithGraph(graph);
+  const [mode, setMode] = useState<'classic'|'composer'>('composer'); // default to new flow
   const [tokens, setTokens] = useState<SlotDescriptor[]>([]);
   const [pinned, setPinned] = useState<boolean>(false);
   const [testPrompt, setTestPrompt] = useState<string | null>(null);
   const [textInput, setTextInput] = useState<string>('');
   const [showTextInput, setShowTextInput] = useState<boolean>(false);
+  const [originalPhraseText, setOriginalPhraseText] = useState<string | null>(null);
+  const [isSettingFromUseButton, setIsSettingFromUseButton] = useState<boolean>(false);
   
   // Stable ref to the test prompt box so we can ensure visibility
   const testPromptRef = useRef<HTMLDivElement | null>(null);
@@ -47,10 +52,15 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     console.log('🔍 testPrompt state changed to:', testPrompt);
   }, [testPrompt]);
 
+  // Debug: Track originalPhraseText changes
+  useEffect(() => {
+    console.log('🔍 originalPhraseText state changed to:', originalPhraseText);
+  }, [originalPhraseText]);
+
   // If your "Test" button lives inside a form, prevent accidental submit refresh in text mode.
-  const handleTestClick = (e?: React.MouseEvent<HTMLButtonElement>) => {
+  const handleTestClick = async (e?: React.MouseEvent<HTMLButtonElement>) => {
     if (e && typeof e.preventDefault === 'function') e.preventDefault();
-    testTemplate();
+    await testTemplate();
   };
 
   // Ensure the box scrolls into view after updates (and isn't visually hidden below the fold)
@@ -70,22 +80,13 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     console.log('🔍 testPrompt changed, forcing re-render');
   }, [testPrompt]);
 
-  // Helper function to parse morphological specifiers from POS tags
-  function parseMorphSpecifier(pos: string): { basePos: string; morph?: string } {
-    if (pos.includes(':')) {
-      const [basePos, morph] = pos.split(':');
-      console.log('🔍 parseMorphSpecifier:', pos, '-> basePos:', basePos, 'morph:', morph);
-      return { basePos, morph };
-    }
-    console.log('🔍 parseMorphSpecifier:', pos, '-> no morph');
-    return { basePos: pos };
-  }
 
   function addPOS(pos: POS) {
     const newTokens: SlotDescriptor[] = [...tokens, { kind: 'slot', pos }];
     setTokens(newTokens);
     if (showTextInput) {
-      setTextInput(tokensToText(newTokens));
+      const text = '[' + newTokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+      setTextInput(text);
     }
   }
   function addChunk(pattern: string) {
@@ -98,27 +99,38 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     const newTokens: SlotDescriptor[] = [...tokens, { kind: 'chunk', pos: 'NOUN', chunkPattern: pattern }];
     setTokens(newTokens);
     if (showTextInput) {
-      setTextInput(tokensToText(newTokens));
+      const text = '[' + newTokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+      setTextInput(text);
     }
   }
   function removeAt(idx: number) {
     const newTokens = tokens.filter((_, i) => i !== idx);
     setTokens(newTokens);
     if (showTextInput) {
-      setTextInput(tokensToText(newTokens));
+      const text = '[' + newTokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+      setTextInput(text);
     }
   }
   function clearAll() {
     setTokens([]);
     setTextInput('');
+    setOriginalPhraseText(null);
   }
   function save() {
-    const text = '[' + tokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join(' ') + ']';
-    addSessionTemplate(sessionId, { text, slots: tokens, pinned, tags: ['user'] });
-    clearAll(); setPinned(false);
+    const text = '[' + tokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+    try {
+      const template = createTemplateFromText(text, sessionId, originalPhraseText || undefined);
+      addSessionTemplate(sessionId, { ...template, pinned, tags: ['user'] });
+      clearAll(); setPinned(false);
+    } catch (error) {
+      console.log('🔍 Error creating template for save:', error);
+      // Fallback to direct creation if parsing fails
+      addSessionTemplate(sessionId, { text, slots: tokens, baseText: originalPhraseText || undefined, pinned, tags: ['user'] });
+      clearAll(); setPinned(false);
+    }
   }
 
-  function testTemplate() {
+  async function testTemplate() {
     const slots = tokens; // IMPORTANT: do not auto-number here
     console.log('🔍 testTemplate called with slots:', slots);
     console.log('🔍 showTextInput mode:', showTextInput);
@@ -129,331 +141,77 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
       return;
     }
 
-    // Preview for logs
-    const patternPreview = slots
-      .map(s => (s.kind === 'chunk' ? `[${s.chunkPattern}]` : `${s.pos}${s.index ?? ''}`))
-      .join(' ');
-    console.log('🎯 Template pattern:', `[${patternPreview}]`);
-
-      // Helper: remove digits from POS tokens (NOUN1 -> NOUN)
-  const stripDigits = (s: string) => s.replace(/\d+/g, '');
-
-  // Cache base text (chunk or phrase) by normalized POS pattern for this test run
-  const baseByPattern = new Map<string, string>();
-  const findBaseTextForPattern = (normalizedPattern: string): string => {
-    if (baseByPattern.has(normalizedPattern)) return baseByPattern.get(normalizedPattern)!;
-    // Prefer chunk first (more "local"), then phrase fallback
-    const chunk = ctx.chunks?.find((ch: any) => ch.posPattern === normalizedPattern);
-    if (chunk?.text) {
-      baseByPattern.set(normalizedPattern, chunk.text);
-      return chunk.text;
-    }
-    const phrase = ctx.phrases?.find((p: any) => p.posPattern === normalizedPattern);
-    if (phrase?.text) {
-      baseByPattern.set(normalizedPattern, phrase.text);
-      return phrase.text;
-    }
-    baseByPattern.set(normalizedPattern, '');
-    return '';
-  };
-
-  // Try a base phrase only if ALL top-level slots are word slots
-    const isAllWordSlots = slots.every(s => s.kind === 'slot');
-    let baseText = '';
-    if (isAllWordSlots) {
-      const normalizedPattern = slots.map(s => stripDigits(s.pos)).join('-');
-      const basePhrase = ctx.phrases.find(p => p.posPattern === normalizedPattern);
-      if (basePhrase) {
-        console.log('✅ Found matching phrase:', basePhrase.text);
-        baseText = basePhrase.text;
-      }
-    }
-
-    const baseWords = baseText ? baseText.split(/\s+/) : [];
-
-    // Build POS → ctx words for random picks
-    const wordsByPOS = new Map<POS, any[]>();
-    POS_ORDER.forEach(pos => {
-      const words = ctx.words.filter(w => w.pos?.includes(pos));
-      console.log('🔍 wordsByPOS for', pos, ':', words.length, 'words');
-      wordsByPOS.set(pos, words);
-    });
-
-    const usedIds = new Set<string>();
-    const chosenByKey = new Map<string, string>(); // `${POS}:${index}` => chosen lemma/text
-
-    // Lightweight fallback bank (or import your central wordBank)
-    const bank: Record<POS, string[]> = {
-      NOUN: ['cat','dog','bird','fish','tree','house','car','book','hand','eye'],
-      VERB: ['ate','ran','jumped','sang','danced','walked','drove','read','wrote','saw'],
-      'VERB:participle': ['eating','running','jumping','singing','dancing','walking','driving','reading','writing','seeing'],
-      'VERB:past': ['ate','ran','jumped','sang','danced','walked','drove','read','wrote','saw'],
-      'VERB:present_3rd': ['eats','runs','jumps','sings','dances','walks','drives','reads','writes','sees'],
-      ADJ: ['big','small','red','blue','green','happy','sad','fast','slow','loud'],
-      'ADJ:comparative': ['bigger','smaller','redder','bluer','greener','happier','sadder','faster','slower','louder'],
-      'ADJ:superlative': ['biggest','smallest','reddest','bluest','greenest','happiest','saddest','fastest','slowest','loudest'],
-      ADV: ['quickly','slowly','quietly','loudly','carefully','suddenly','always','never','often','sometimes'],
-      ADP: ['in','on','at','by','with','about','against','between','into','through'],
-      DET: ['a','an','the','this','that','these','those','my','your','his'],
-      PRON: ['I','you','he','she','it','we','they','me','him','her'],
-      PROPN: ['Alice','Bob','Charlie','Diana','Eve','Frank','Grace','Henry','Ivy','Jack'],
-      AUX: ['is','are','was','were','be','been','being','have','has','had']
-    } as any;
-
-    const pickRandomForPOS = (pos: POS): string => {
-      console.log('🔍 pickRandomForPOS called with pos:', pos);
-      const pool = (wordsByPOS.get(pos) || []).filter((w: any) => !usedIds.has(w.id));
-      console.log('🔍 Pool for', pos, ':', pool.length, 'words');
-      if (pool.length) {
-        const w = pool[Math.floor(Math.random() * pool.length)];
-        usedIds.add(w.id);
-        const result = w.lemma || w.text || '';
-        console.log('🔍 Picked from pool:', result);
-        return result;
-      }
-      const b = bank[pos] || [];
-      const result = b[Math.floor(Math.random() * b.length)] || pos.toLowerCase();
-      console.log('🔍 Picked from bank:', result, 'for pos:', pos);
-      return result;
-    };
-
-    const resolveWordSlot = (slot: SlotDescriptor, position: number): string => {
-      console.log('🔍 resolveWordSlot called with slot:', slot, 'position:', position);
-      // Parse morphological specifier
-      const { basePos, morph } = parseMorphSpecifier(slot.pos);
+    try {
+      // Create a template from the current text input or tokens
+      const templateText = showTextInput ? textInput : '[' + tokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
       
-      // Numbered → pick once and reuse per `${POS}:${index}`
-      if (slot.index !== undefined) {
-        const key = `${slot.pos}:${slot.index}`;
-        if (!chosenByKey.has(key)) {
-          // Try to find word with matching morphological feature
-          if (morph) {
-            const morphWord = ctx.words.find(w => 
-              w.pos?.includes(basePos) && w.morphFeature === morph
-            );
-            if (morphWord) {
-              chosenByKey.set(key, morphWord.originalForm || morphWord.lemma || morphWord.text);
-            } else {
-              chosenByKey.set(key, pickRandomForPOS(slot.pos));
-            }
-          } else {
-            chosenByKey.set(key, pickRandomForPOS(slot.pos));
-          }
-        }
-        return chosenByKey.get(key)!;
-      }
+      // Create template with base text if available
+      console.log('🔍 originalPhraseText in testTemplate:', originalPhraseText);
+      const template = createTemplateFromText(templateText, sessionId, originalPhraseText ?? undefined);
       
-      // Unnumbered → keep base word at this position if available
-      if (baseWords.length && position < baseWords.length) {
-        return baseWords[position];
-      }
+      // Use centralized fillTemplateSlotsRandom for testing
+      const result = await fillTemplateSlotsRandom(template, ctx, { lockedWordIds: [], lockedChunkIds: [], lockedTemplateIds: [] }, Math.random);
       
-      // Try to find word with matching morphological feature
-      if (morph) {
-        console.log('🔍 Looking for morph word with basePos:', basePos, 'morph:', morph);
-        const morphWord = ctx.words.find(w => 
-          w.pos?.includes(basePos) && w.morphFeature === morph
-        );
-        console.log('🔍 Found morph word:', morphWord);
-        if (morphWord) {
-          const result = morphWord.originalForm || morphWord.lemma || morphWord.text;
-          console.log('🔍 Returning morph word result:', result);
-          return result;
-        }
-      }
-      
-      // Else random
-      return pickRandomForPOS(slot.pos);
-    };
-
-      const resolveChunkSlot = (slot: SlotDescriptor): string => {
-    const raw = slot.chunkPattern || '';
-    const normalized = raw.split(/[- ]+/).map(stripDigits).join('-'); // remove any digit suffixes
-    const parts = raw.split(/[- ]+/);
-
-    console.log('🔍 resolveChunkSlot called with pattern:', raw, 'parts:', parts);
-
-    // New: lookup base text by pattern (chunk first, then phrase fallback)
-    const baseTextForPattern = findBaseTextForPattern(normalized);
-
-    // If no stored chunk/phrase found, synthesize (keep numbered memoization semantics)
-    if (!baseTextForPattern) {
-      return parts
-        .map(part => {
-          console.log('🔍 Processing chunk part:', part);
-          // Handle morphological features like ADJ:comparative
-          if (part.includes(':')) {
-            const { basePos, morph } = parseMorphSpecifier(part);
-            console.log('🔍 Morphological part:', part, '-> basePos:', basePos, 'morph:', morph);
-            
-            // Try to find word with matching morphological feature
-            if (morph) {
-              const morphWord = ctx.words.find(w => 
-                w.pos?.includes(basePos) && w.morphFeature === morph
-              );
-              if (morphWord) {
-                const result = morphWord.originalForm || morphWord.lemma || morphWord.text;
-                console.log('🔍 Found morph word in chunk:', result);
-                return result;
-              }
-            }
-            
-            // Fall back to word bank
-            const result = pickRandomForPOS(part as POS);
-            console.log('🔍 Fallback for morph part:', result);
-            return result;
-          }
-          
-          // Handle regular POS with optional numbers
-          const m = part.match(/^([A-Z]+)(\d+)?$/);
-          if (!m) return part;
-          const pos = m[1] as POS;
-          const idx = m[2] ? parseInt(m[2], 10) : undefined;
-          if (idx !== undefined) {
-            const key = `${pos}:${idx}`;
-            if (!chosenByKey.has(key)) chosenByKey.set(key, pickRandomForPOS(pos));
-            return chosenByKey.get(key)!;
-          }
-          return pickRandomForPOS(pos);
-        })
-        .join(' ');
-    }
-
-    // Use base chunk/phrase text for unnumbered subparts; randomize only numbered
-    const baseWords = baseTextForPattern.split(/\s+/);
-    return parts
-      .map((part, i) => {
-        // Handle morphological features in base text
-        if (part.includes(':')) {
-          const { basePos, morph } = parseMorphSpecifier(part);
-          if (morph) {
-            const morphWord = ctx.words.find(w => 
-              w.pos?.includes(basePos) && w.morphFeature === morph
-            );
-            if (morphWord) {
-              return morphWord.originalForm || morphWord.lemma || morphWord.text;
-            }
-          }
-          return pickRandomForPOS(part as POS);
-        }
+      if (result) {
+        const finalText = result.text;
+        console.log('✅ Generated prompt:', finalText);
+        console.log('🔍 Setting testPrompt to:', finalText);
         
-        const m = part.match(/^([A-Z]+)(\d+)?$/);
-        if (!m) return part;
-        const pos = m[1] as POS;
-        const idx = m[2] ? parseInt(m[2], 10) : undefined;
-        if (idx !== undefined) {
-          const key = `${pos}:${idx}`;
-          if (!chosenByKey.has(key)) chosenByKey.set(key, pickRandomForPOS(pos));
-          return chosenByKey.get(key)!;
-        }
-        // Unnumbered → keep base word at same sub-index if available
-        return baseWords[i] ?? pickRandomForPOS(pos);
-      })
-      .join(' ');
-  };
-
-    const out = slots.map((slot, position) => {
-      console.log('🔍 Processing slot at position', position, ':', slot);
-      if (slot.kind === 'chunk') {
-        return resolveChunkSlot(slot);
+        // Use setTimeout to ensure state update happens after current render cycle
+        setTimeout(() => {
+          setTestPrompt(finalText);
+          console.log('🔍 setTestPrompt called with:', finalText);
+        }, 0);
       } else {
-        return resolveWordSlot(slot, position);
+        setTestPrompt('Failed to generate test prompt');
       }
-    });
-
-    const text = out.join(' ').trim();
-    const finalText = text ? text[0].toUpperCase() + text.slice(1) : '';
-    console.log('✅ Generated prompt:', finalText);
-    console.log('🔍 Setting testPrompt to:', finalText);
-    console.log('🔍 Current testPrompt state before setTestPrompt:', testPrompt);
-    
-    // Use setTimeout to ensure state update happens after current render cycle
-    setTimeout(() => {
-      setTestPrompt(finalText);
-      console.log('🔍 setTestPrompt called with:', finalText);
-    }, 0);
-  }
-
-  // Parse text input to tokens
-  function parseTextToTokens(text: string): SlotDescriptor[] {
-    const tokens: SlotDescriptor[] = [];
-    // Remove any outer brackets if present
-    const cleanText = text.trim().replace(/^\[|\]$/g, '');
-    const parts = cleanText.split(/\s+/);
-    
-    console.log('🔍 Parsing text:', text, '-> cleanText:', cleanText, '-> parts:', parts);
-    
-    for (const part of parts) {
-      // Handle chunk patterns like [ADJ NOUN ADP NOUN] or [NOUN1-NOUN2]
-      if (part.startsWith('[') && part.endsWith(']')) {
-        const pattern = part.slice(1, -1);
-        tokens.push({
-          kind: 'chunk',
-          pos: 'NOUN',
-          chunkPattern: pattern
-        });
-      }
-      // Handle hyphenated patterns like DET-ADJ-NOUN1 (treat as chunk)
-      else if (part.includes('-') && /^[A-Z]+(:[a-z_]+)?(\d+)?(-[A-Z]+(:[a-z_]+)?(\d+)?)*$/.test(part)) {
-        console.log('🔍 Parsing hyphenated pattern as chunk:', part);
-        tokens.push({
-          kind: 'chunk',
-          pos: 'NOUN',
-          chunkPattern: part
-        });
-      }
-      // Handle POS slots like NOUN1, VERB, VERB:participle, ADJ:comparative, etc.
-      else if (/^[A-Z]+(:[a-z_]+)?(\d+)?$/.test(part)) {
-        const match = part.match(/^([A-Z]+)(:[a-z_]+)?(\d+)?$/);
-        if (match) {
-          const pos = (match[1] + (match[2] || '')) as POS;
-          const index = match[3] ? parseInt(match[3], 10) : undefined;
-          console.log('🔍 Parsed POS:', pos, 'index:', index);
-          tokens.push({
-            kind: 'slot',
-            pos,
-            index
-          });
-        }
-      } else {
-        console.log('🔍 Skipping unrecognized part:', part);
-      }
+    } catch (error) {
+      console.log('🔍 Error in testTemplate:', error);
+      setTestPrompt('Error generating test prompt');
     }
-    
-    console.log('🔍 Final parsed tokens:', tokens);
-    return tokens;
   }
 
-  // Convert tokens to text representation
-  function tokensToText(tokens: SlotDescriptor[]): string {
-    return tokens.map(t => {
-      if (t.kind === 'chunk') {
-        return `[${t.chunkPattern}]`;
-      } else {
-        return `${t.pos}${t.index ?? ''}`;
-      }
-    }).join(' ');
-  }
+
 
   // Handle text input change
   function handleTextInputChange(value: string) {
     console.log('🔍 handleTextInputChange called with value:', value);
+    console.log('🔍 isSettingFromUseButton:', isSettingFromUseButton);
     setTextInput(value);
-    const newTokens = parseTextToTokens(value);
-    console.log('🔍 Parsed tokens from text input:', newTokens);
-    setTokens(newTokens);
-    console.log('🔍 Tokens state updated to:', newTokens);
+    
+    // Clear original phrase text when user manually types (not from Use button)
+    if (!isSettingFromUseButton) {
+      setOriginalPhraseText(null);
+    } else {
+      // Reset the flag after handling the Use button case
+      setIsSettingFromUseButton(false);
+    }
+    try {
+      const template = createTemplateFromText(value, sessionId);
+      console.log('🔍 Parsed template from text input:', template);
+      setTokens(template.slots);
+      console.log('🔍 Tokens state updated to:', template.slots);
+    } catch (error) {
+      console.log('🔍 Error parsing template:', error);
+      setTokens([]);
+    }
   }
 
   // Toggle between chip view and text input
   function toggleTextInput() {
     if (showTextInput) {
       // Switching to chip view - parse current text
-      const newTokens = parseTextToTokens(textInput);
-      setTokens(newTokens);
+      try {
+        const template = createTemplateFromText(textInput, sessionId);
+        setTokens(template.slots);
+      } catch (error) {
+        console.log('🔍 Error parsing template in toggle:', error);
+        setTokens([]);
+      }
     } else {
       // Switching to text view - convert current tokens to text
-      setTextInput(tokensToText(tokens));
+      const text = '[' + tokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+      setTextInput(text);
     }
     setShowTextInput(!showTextInput);
   }
@@ -466,6 +224,18 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
         <h2 className="text-xl font-semibold">Template Editor</h2>
         <div className="space-x-2">
           <button
+            className={`px-2 py-1 rounded ${mode==='composer'?'bg-blue-600 text-white':'bg-gray-200'}`}
+            onClick={() => setMode('composer')}
+          >
+            Composer
+          </button>
+          <button
+            className={`px-2 py-1 rounded ${mode==='classic'?'bg-blue-600 text-white':'bg-gray-200'}`}
+            onClick={() => setMode('classic')}
+          >
+            Classic
+          </button>
+          <button
             className="btn-secondary px-4 py-2 rounded-lg text-sm font-medium"
             onClick={onClose}
           >
@@ -473,6 +243,11 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
           </button>
         </div>
       </div>
+
+      {mode === 'composer' ? (
+        <ComposerEditor sessionId={sessionId} graph={graph} />
+      ) : (
+        <>
 
       {/* Pools */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -542,14 +317,24 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
                   <button
                     className="btn-secondary px-2 py-1 rounded text-xs"
                     onClick={() => {
-                      // replace editor tokens with phrase as a chunk pattern
+                      // replace editor tokens with phrase as individual slots
                       console.log('🎯 Using phrase:', ph.text);
                       console.log('🎯 Phrase pattern:', ph.posPattern);
-                      setTokens([{ 
-                        kind: 'chunk', 
-                        pos: 'NOUN', 
-                        chunkPattern: ph.posPattern 
-                      }]);
+                      console.log('🎯 Use button clicked!');
+                      
+                      // Parse the phrase pattern into individual slots
+                      const patternSlots = ph.posPattern.split('-').map(pos => ({
+                        kind: 'slot' as const,
+                        pos: pos as POS
+                      }));
+                      
+                      setTokens(patternSlots);
+                      
+                      // Store the original phrase text for template creation
+                      setIsSettingFromUseButton(true);
+                      setTextInput(`[${ph.posPattern}]`);
+                      setOriginalPhraseText(ph.text);
+                      console.log('🔍 Set originalPhraseText to:', ph.text);
                     }}
                   >
                     Use
@@ -690,7 +475,7 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
             <div key={t.id} className="flex items-center justify-between border rounded px-2 py-1">
               <div className="truncate text-sm">{t.text}</div>
               <div className="flex items-center gap-2">
-                <span className="bg-gray-200 px-2 py-1 rounded text-xs">{t.source}</span>
+                <span className="bg-gray-200 px-2 py-1 rounded text-xs">template</span>
                 <button
                   className="btn-secondary px-2 py-1 rounded text-xs"
                   onClick={() => updateSessionTemplate(sessionId, t.id, { pinned: !t.pinned })}
@@ -709,6 +494,8 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
           {!sessionTemplates.length && <div className="text-sm text-muted-foreground">No session templates yet.</div>}
         </div>
       </div>
+        </>
+      )}
         </div>
       </div>
     </div>

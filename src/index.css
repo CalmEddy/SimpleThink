@@ -218,3 +218,11 @@ code {
   transform: scale(1.1);
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
 }
+
+/* Composer: force LTR everywhere inside the editor & preview */
+[data-composer-root],
+[data-composer-root] * {
+  direction: ltr !important;
+  unicode-bidi: plaintext !important;
+  text-align: left !important;
+}

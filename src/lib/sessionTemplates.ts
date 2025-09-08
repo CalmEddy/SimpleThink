@@ -7,14 +7,14 @@ export function listSessionTemplates(sessionId: string): UserTemplate[] {
   return store.get(sessionId) ?? [];
 }
 
-export function addSessionTemplate(sessionId: string, tpl: Omit<UserTemplate, 'id' | 'createdInSessionId' | 'source'> & { source?: UserTemplate['source'] }): UserTemplate {
+export function addSessionTemplate(sessionId: string, tpl: Omit<UserTemplate, 'id' | 'createdInSessionId'>): UserTemplate {
   const arr = store.get(sessionId) ?? [];
   const created: UserTemplate = {
     id: uuid(),
     createdInSessionId: sessionId,
-    source: tpl.source ?? 'user',
     text: tpl.text,
     slots: tpl.slots,
+    baseText: tpl.baseText,
     pinned: tpl.pinned ?? false,
     tags: tpl.tags ?? [],
   };

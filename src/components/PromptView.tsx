@@ -38,7 +38,7 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
     
     try {
       setIsGenerating(true);
-      const newPrompts = generateEphemeralPrompts(
+      const newPrompts = await generateEphemeralPrompts(
         graph, 
         ctx, 
         contextFrame.sessionId, 
@@ -77,7 +77,7 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
       
       if (selectedPrompt) {
         // Responding to existing stored prompt
-        const result = recordResponse(selectedPrompt.id, responseText.trim(), graph);
+        const result = await recordResponse(selectedPrompt.id, responseText.trim(), graph);
         setLastResponse(result.responseNode);
       } else if (selectedEphemeralPrompt && contextFrame) {
         // Responding to ephemeral prompt - convert to stored prompt first
@@ -95,7 +95,7 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
         graph.addEdge(promptNode.id, contextFrame.sessionId, 'CREATED_IN_SESSION');
 
         // Record response
-        const result = recordResponse(promptNode.id, responseText.trim(), graph);
+        const result = await recordResponse(promptNode.id, responseText.trim(), graph);
         setLastResponse(result.responseNode);
         
         // Remove from ephemeral list and add to stored prompts
