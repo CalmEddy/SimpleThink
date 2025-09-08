@@ -144,7 +144,8 @@ export interface SlotDescriptor {
   raw?: string;
 }
 
-export interface UserTemplate {
+// Legacy UserTemplate interface - kept for backward compatibility
+export interface LegacyUserTemplate {
   id: string;
   text: string;              // e.g., "[NOUN1 VERB NOUN1]" or "[ADJ NOUN ADP NOUN]"
   slots: SlotDescriptor[];   // ordered slots
@@ -245,3 +246,50 @@ export interface AnalyzedToken {
   pos?: POS;            // contextual tag for this occurrence
   posSet?: POS[];       // all plausible tags for this lemma/word
 }
+
+// ==== UTA: Unified Template Architecture types ====
+
+export type SelectionSource = 'LOCKED' | 'CONTEXT' | 'BANK' | 'LITERAL';
+
+export interface BindingSpec {
+  id: string;           // e.g., "N1", "V2"
+  pos: POS;             // canonical POS for the group
+  morph?: MorphFeature; // default morph applied if not overridden on a slot
+}
+
+export type TemplateToken =
+  | {
+      kind: 'literal';
+      surface: string;
+      lemma?: string;
+      pos?: POS;
+      raw?: string;
+    }
+  | {
+      kind: 'slot';
+      pos: POS;
+      morph?: MorphFeature;
+      bindId?: string;                    // e.g., "N1"
+      selectionPolicy?: SelectionSource[]; // default applied if absent
+      fallbackLiteral?: string;           // used only if 'LITERAL' in policy
+      raw?: string;
+    }
+  | {
+      kind: 'subtemplate';
+      tokens: TemplateToken[];
+      raw?: string;
+    };
+
+export interface UnifiedTemplate {
+  id: string;
+  text: string;                            // canonical DSL string
+  tokens: TemplateToken[];
+  bindings?: Record<string, BindingSpec>;  // bindId -> spec
+  createdInSessionId: string;
+  pinned?: boolean;
+  tags?: string[];
+  origin?: 'phrase' | 'user' | 'static' | 'chunk';
+}
+
+// Back-compat: keep old name compiling without behavior
+export type UserTemplate = UnifiedTemplate;

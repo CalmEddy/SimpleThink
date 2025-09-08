@@ -1,7 +1,8 @@
-import type { TemplateDoc, TemplateBlock, PhraseToken, POS, WordNode, PhraseNode, AnalyzedToken, MorphFeature, TextBlock, PhraseBlock } from '../types';
+import type { TemplateDoc, TemplateBlock, PhraseToken, POS, WordNode, PhraseNode, AnalyzedToken, MorphFeature, TextBlock, PhraseBlock, UnifiedTemplate, TemplateToken } from '../types';
 import type { SemanticGraphLite } from './semanticGraphLite';
 import { wordBank } from './templates'; // fallback bank
 import { TenseConverter } from './tenseConverter';
+import { realizeTemplate } from './fillTemplate';
 
 export interface GenerateOptions {
   graph: SemanticGraphLite;
@@ -108,8 +109,114 @@ export function generateFromDoc(doc: TemplateDoc, opts: GenerateOptions): string
   return normalizeSpaces(final).trim();
 }
 
-// New: fully async version to avoid "[…]" in Preview.
+// New UTA-based version that uses the unified template architecture
 export async function generateFromDocAsync(
+  doc: TemplateDoc,
+  { graph, bank }: { graph?: SemanticGraphLite; bank?: any }
+): Promise<string> {
+  console.log('🔍 UTA DEBUG: generateFromDocAsync called with UTA system');
+  
+  // Convert TemplateDoc to UnifiedTemplate
+  const unifiedTemplate = convertTemplateDocToUnified(doc);
+  console.log('🔍 UTA DEBUG: Converted to UnifiedTemplate:', unifiedTemplate);
+  
+  // Get contextual words from graph
+  const ctx = {
+    words: graph ? graph.getNodesByType('WORD') as WordNode[] : [],
+    phrases: graph ? graph.getNodesByType('PHRASE') as PhraseNode[] : []
+  };
+  console.log('🔍 UTA DEBUG: Context words:', ctx.words.length);
+  
+  // Use the UTA system to realize the template
+  const result = await realizeTemplate({
+    tpl: unifiedTemplate,
+    ctx,
+    lockedSet: new Set(),
+    wordBank: { ...wordBank, ...(bank || {}) }
+  });
+  
+  console.log('🔍 UTA DEBUG: UTA result:', result);
+  return result.surface;
+}
+
+// Convert TemplateDoc format to UnifiedTemplate format
+function convertTemplateDocToUnified(doc: TemplateDoc): UnifiedTemplate {
+  const tokens: TemplateToken[] = [];
+  
+  for (const block of doc.blocks) {
+    if (block.kind === 'text') {
+      // Text blocks become literal tokens
+      const textBlock = block as TextBlock;
+      if (textBlock.text.trim()) {
+        tokens.push({
+          kind: 'literal',
+          surface: textBlock.text
+        });
+      }
+    } else if (block.kind === 'phrase') {
+      // Phrase blocks become subtemplate tokens
+      const phraseBlock = block as PhraseBlock;
+      const phraseTokens: TemplateToken[] = [];
+      
+      for (const token of phraseBlock.tokens) {
+        if (token.randomize) {
+          // Create a slot token
+          const pos = token.pos || 'NOUN'; // fallback to NOUN
+          const morph = token.morph || undefined;
+          const bindId = token.slotLabel || undefined;
+          
+          phraseTokens.push({
+            kind: 'slot',
+            pos: pos as any,
+            morph: morph as any,
+            bindId: bindId
+          });
+        } else {
+          // Create a literal token
+          phraseTokens.push({
+            kind: 'literal',
+            surface: token.text
+          });
+        }
+      }
+      
+      // Wrap phrase tokens in a subtemplate
+      tokens.push({
+        kind: 'subtemplate',
+        tokens: phraseTokens
+      });
+    }
+  }
+  
+  return {
+    id: doc.id,
+    text: serializeTemplateDoc(doc), // Create a text representation
+    tokens,
+    bindings: undefined, // Will be built by buildBindings if needed
+    createdInSessionId: doc.createdInSessionId,
+    source: 'user' as const
+  };
+}
+
+// Helper to serialize TemplateDoc back to text (for the text field)
+function serializeTemplateDoc(doc: TemplateDoc): string {
+  const pieces: string[] = [];
+  
+  for (const block of doc.blocks) {
+    if (block.kind === 'text') {
+      pieces.push((block as TextBlock).text);
+    } else if (block.kind === 'phrase') {
+      const phraseBlock = block as PhraseBlock;
+      const phraseText = phraseBlock.tokens.map(t => t.text).join(' ');
+      pieces.push(`[${phraseText}]`); // Wrap phrases in brackets for clarity
+    }
+  }
+  
+  return pieces.join('');
+}
+
+// Legacy version kept for backward compatibility
+export async function generateFromDocAsyncLegacy(
   doc: TemplateDoc,
   { graph }: { graph?: SemanticGraphLite; bank?: any }
 ): Promise<string> {

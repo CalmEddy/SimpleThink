@@ -1,5 +1,5 @@
 import type { SemanticGraphLite } from './semanticGraphLite.js';
-import type { PhraseNode, PromptNode, PromptSlotBinding, UserTemplate, SlotDescriptor, POS, SessionLocks, EphemeralPrompt, WordNode, MorphFeature } from '../types/index.js';
+import type { PhraseNode, PromptNode, PromptSlotBinding, UserTemplate, SlotDescriptor, POS, SessionLocks, EphemeralPrompt, WordNode, MorphFeature, UnifiedTemplate, TemplateToken } from '../types/index.js';
 import type { ContextualNodeSets } from '../contexts/ActiveNodesContext.js';
 import { TEMPLATES, getRandomWordForSlot } from './templates.js';
 import { surfaceRelatedPhrases } from './retrieve.js';
@@ -7,6 +7,8 @@ import { listSessionTemplates } from './sessionTemplates.js';
 import { getSessionLocks } from './sessionLocks.js';
 import wordBank from './templates.js';
 import { tenseConverter, type MorphologicalType } from './tenseConverter.js';
+import { parseTemplateTextToTokens, buildBindings } from './parseTemplateText.js';
+import { realizeTemplate } from './fillTemplate.js';
 
 export interface PromptResult {
   promptText: string;
@@ -246,6 +248,39 @@ export const createPromptFromPhrase = async (
 
 // NEW: Enhanced Template system functions
 
+// Helper: build a phrase-derived unified template
+function buildPhraseTemplate(sessionId: string, p: { id: string; text: string; posPattern: string }): UnifiedTemplate {
+  const posTags = p.posPattern.split('-');                  // e.g., ["DET","NOUN","VERB"]
+  const baseWords = tokenizeSurface(p.text);                // align by whitespace for now
+
+  const tokens: TemplateToken[] = posTags.map((tag, i) => {
+    const [posStr, morphStr] = tag.split(':') as [POS, any];
+    return {
+      kind: 'slot',
+      pos: posStr as POS,
+      morph: morphStr,
+      selectionPolicy: ['LOCKED', 'CONTEXT', 'LITERAL', 'BANK'],
+      fallbackLiteral: baseWords[i] ?? undefined,
+      raw: `[${tag}]`,
+    };
+  });
+
+  const text = `[${posTags.join(' ')}]`;
+  const tpl: UnifiedTemplate = {
+    id: `phrase:${p.id}`,
+    text,
+    tokens,
+    bindings: buildBindings(tokens),
+    createdInSessionId: sessionId,
+    origin: 'phrase',
+  };
+  return tpl;
+}
+
+function tokenizeSurface(s: string): string[] {
+  return s.split(/\s+/).filter(Boolean);
+}
+
 // Utility: convert POS pattern ("ADV-NOUN-VERB-…") to unnumbered slots
 export function posPatternToSlots(pattern: string): SlotDescriptor[] {
   const parts = pattern.split('-').map(s => s.trim().toUpperCase()) as POS[];
@@ -345,24 +380,59 @@ export function createTemplateFromText(templateText: string, sessionId: string, 
   };
 }
 
-// Build available templates: context phrases -> POS templates, context chunks -> chunk templates, plus user session templates
-export function getAvailableTemplates(ctx: ContextualNodeSets, sessionId: string): UserTemplate[] {
+// UPDATE getAvailableTemplates to return UnifiedTemplate[]
+export function getAvailableTemplates(ctx: ContextualNodeSets, sessionId: string): UnifiedTemplate[] {
+  const phraseTpls: UnifiedTemplate[] = (ctx.phrases ?? []).map((p: any) =>
+    buildPhraseTemplate(sessionId, p)
+  );
+
+  // Static/User/Chunk templates: always parse through unified parser
   const userTpls = listSessionTemplates(sessionId);
-  const phraseTpls: UserTemplate[] = ctx.phrases.map(p => ({
-    id: `phrase:${p.id}`,
-    text: `[${p.posPattern.replace(/-/g, ' ')}]`,
-    slots: parseTemplateText(`[${p.posPattern.replace(/-/g, ' ')}]`),
-    createdInSessionId: sessionId,
-    baseText: p.text,  // Add base text for phrase templates
-  }));
-  const chunkTpls: UserTemplate[] = ctx.chunks.map(c => ({
-    id: `chunk:${c.id}`,
-    text: `[${c.posPattern}]`,
-    slots: [{ kind: 'chunk', pos: 'NOUN', chunkPattern: c.posPattern }],
-    createdInSessionId: sessionId,
-  }));
-  const merged = new Map<string, UserTemplate>();
-  [...phraseTpls, ...chunkTpls, ...userTpls].forEach(t => merged.set(t.id, t));
+  const otherTpls: UnifiedTemplate[] = (userTpls ?? []).map((t: any) => {
+    const tokens = parseTemplateTextToTokens(t.text);
+    const tpl: UnifiedTemplate = {
+      id: t.id,
+      text: t.text,
+      tokens,
+      bindings: buildBindings(tokens),
+      createdInSessionId: sessionId,
+      pinned: t.pinned,
+      tags: t.tags,
+      origin: t.origin ?? 'user',
+    };
+    return tpl;
+  });
+
+  // Add static templates from TEMPLATES
+  const staticTpls: UnifiedTemplate[] = TEMPLATES.map((t: any) => {
+    const tokens = parseTemplateTextToTokens(t.text);
+    const tpl: UnifiedTemplate = {
+      id: t.id,
+      text: t.text,
+      tokens,
+      bindings: buildBindings(tokens),
+      createdInSessionId: sessionId,
+      origin: 'static',
+    };
+    return tpl;
+  });
+
+  // Add chunk templates
+  const chunkTpls: UnifiedTemplate[] = (ctx.chunks ?? []).map((c: any) => {
+    const tokens = parseTemplateTextToTokens(`[CHUNK:[${c.posPattern}]]`);
+    const tpl: UnifiedTemplate = {
+      id: `chunk:${c.id}`,
+      text: `[CHUNK:[${c.posPattern}]]`,
+      tokens,
+      bindings: buildBindings(tokens),
+      createdInSessionId: sessionId,
+      origin: 'chunk',
+    };
+    return tpl;
+  });
+
+  const merged = new Map<string, UnifiedTemplate>();
+  [...phraseTpls, ...otherTpls, ...staticTpls, ...chunkTpls].forEach(t => merged.set(t.id, t));
   return [...merged.values()];
 }
 
@@ -613,21 +683,43 @@ export async function generateEphemeralPrompts(
     const tpl = ordered[Math.floor(rng() * ordered.length)];
     if (!tpl) break;
 
-    const filled = await fillTemplateSlotsRandom(tpl, ctx, locks, rng);
-    if (!filled) { continue; }
+    // Convert to new unified template format if needed
+    const unifiedTpl: UnifiedTemplate = tpl as UnifiedTemplate;
+    const lockedSet = new Set([...(locks.lockedWordIds ?? [])]);
+    
+    const filled = await realizeTemplate({ 
+      tpl: unifiedTpl, 
+      ctx, 
+      lockedSet, 
+      wordBank: wordBank 
+    });
+    
+    if (!filled || !filled.surface) { continue; }
 
     // basic dedupe: avoid identical text within this burst
-    if (recentTexts.has(filled.text)) { continue; }
-    recentTexts.add(filled.text);
+    if (recentTexts.has(filled.surface)) { continue; }
+    recentTexts.add(filled.surface);
+
+    // Create bindings array for compatibility
+    const bindings: EphemeralPrompt['bindings'] = [];
+    const signature = unifiedTpl.tokens.map(t => 
+      t.kind === 'slot' ? `${t.pos}${t.bindId || ''}` : 
+      t.kind === 'subtemplate' ? 'CHUNK' : 'LITERAL'
+    ).join('-');
 
     out.push({
       templateId: tpl.id,
-      templateSignature: filled.templateSignature,
-      text: filled.text,
-      bindings: filled.bindings,
+      templateSignature: signature,
+      text: filled.surface,
+      bindings,
       randomSeed: String(seed ?? 'r' + Math.floor(Math.random() * 1e9)),
     });
   }
 
   return out;
+}
+
+// REPLACE any usage of fillTemplateSlotsRandom with realizeTemplate
+export async function realizeOne(tpl: UnifiedTemplate, ctx: any, lockedSet: Set<string>, wordBank: Record<string, string[]>) {
+  return realizeTemplate({ tpl, ctx, lockedSet, wordBank });
 }

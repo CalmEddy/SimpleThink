@@ -1,29 +1,32 @@
-import { UserTemplate } from '../types/index.js';
+import { UnifiedTemplate } from '../types/index.js';
 import { v4 as uuid } from 'uuid';
+import { parseTemplateTextToTokens, buildBindings } from './parseTemplateText.js';
 
-const store = new Map<string /*sessionId*/, UserTemplate[]>();
+const store = new Map<string /*sessionId*/, UnifiedTemplate[]>();
 
-export function listSessionTemplates(sessionId: string): UserTemplate[] {
+export function listSessionTemplates(sessionId: string): UnifiedTemplate[] {
   return store.get(sessionId) ?? [];
 }
 
-export function addSessionTemplate(sessionId: string, tpl: Omit<UserTemplate, 'id' | 'createdInSessionId'>): UserTemplate {
+export function addSessionTemplate(sessionId: string, tpl: Omit<UnifiedTemplate, 'id' | 'createdInSessionId'>): UnifiedTemplate {
   const arr = store.get(sessionId) ?? [];
-  const created: UserTemplate = {
+  const tokens = parseTemplateTextToTokens(tpl.text);
+  const created: UnifiedTemplate = {
     id: uuid(),
     createdInSessionId: sessionId,
     text: tpl.text,
-    slots: tpl.slots,
-    baseText: tpl.baseText,
+    tokens,
+    bindings: buildBindings(tokens),
     pinned: tpl.pinned ?? false,
     tags: tpl.tags ?? [],
+    origin: tpl.origin ?? 'user',
   };
   arr.push(created);
   store.set(sessionId, arr);
   return created;
 }
 
-export function updateSessionTemplate(sessionId: string, templateId: string, patch: Partial<UserTemplate>): UserTemplate | undefined {
+export function updateSessionTemplate(sessionId: string, templateId: string, patch: Partial<UnifiedTemplate>): UnifiedTemplate | undefined {
   const arr = store.get(sessionId);
   if (!arr) return;
   const idx = arr.findIndex(t => t.id === templateId);
