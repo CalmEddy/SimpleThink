@@ -140,7 +140,8 @@ export async function generateFromDocAsync(
 }
 
 // Convert TemplateDoc format to UnifiedTemplate format
-function convertTemplateDocToUnified(doc: TemplateDoc): UnifiedTemplate {
+// Exported for Prompter; no behavior change.
+export function convertTemplateDocToUnified(doc: TemplateDoc): UnifiedTemplate {
   const tokens: TemplateToken[] = [];
   
   for (const block of doc.blocks) {

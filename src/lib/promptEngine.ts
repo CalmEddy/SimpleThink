@@ -723,3 +723,13 @@ export async function generateEphemeralPrompts(
 export async function realizeOne(tpl: UnifiedTemplate, ctx: any, lockedSet: Set<string>, wordBank: Record<string, string[]>) {
   return realizeTemplate({ tpl, ctx, lockedSet, wordBank });
 }
+
+/**
+ * 🚫 If anyone adds a new export here that calls realizeTemplate directly,
+ * throw loudly so the test suite and manual runs fail fast.
+ */
+export function __FORBID_DIRECT_REALIZE_TEMPLATE__(): never {
+  throw new Error(
+    "Direct realizeTemplate usage from promptEngine is forbidden. Use Prompter (UTA) instead."
+  );
+}

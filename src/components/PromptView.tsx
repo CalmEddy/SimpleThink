@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { SemanticGraphLite } from '../lib/semanticGraphLite.js';
 import { recordResponse, promoteResponseToPhrase, rateResponse } from '../lib/respond.js';
-import { generateEphemeralPrompts } from '../lib/promptEngine.js';
+import { Prompter, mutatorJitter30, mutatorAutoBind, mutatorEnsure2Random } from '../lib/prompter/index.js';
+import { getAvailableTemplates } from '../lib/promptEngine.js';
+import seedrandom from 'seedrandom';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext.js';
-import type { PromptNode, ResponseNode, EphemeralPrompt } from '../types/index.js';
+import type { PromptNode, ResponseNode, EphemeralPrompt, TemplateDoc } from '../types/index.js';
 
 interface PromptViewProps {
   graph: SemanticGraphLite;
@@ -38,12 +40,51 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
     
     try {
       setIsGenerating(true);
-      const newPrompts = await generateEphemeralPrompts(
-        graph, 
-        ctx, 
-        contextFrame.sessionId, 
-        generationCount
-      );
+      
+      // Convert UnifiedTemplate[] to TemplateDoc[] for Prompter
+      const templates = getAvailableTemplates(ctx, contextFrame.sessionId);
+      const templateDocs: TemplateDoc[] = templates.map(tpl => ({
+        id: tpl.id,
+        blocks: [{
+          kind: 'text' as const,
+          text: tpl.text || '',
+          analysis: undefined
+        }],
+        createdInSessionId: contextFrame.sessionId
+      }));
+
+      // Create Prompter with UTA pipeline
+      const prompter = new Prompter({
+        source: templateDocs,
+        mutators: [mutatorJitter30, mutatorAutoBind, mutatorEnsure2Random],
+      });
+
+      // Generate prompts using the same pipeline as ComposerEditor
+      const newPrompts: EphemeralPrompt[] = [];
+      const recentTexts = new Set<string>();
+
+      for (let i = 0; i < generationCount; i++) {
+        try {
+          const { prompt, templateId, templateText, debug } = await prompter.generate({ graph });
+          
+          // Basic dedupe
+          if (recentTexts.has(prompt)) { continue; }
+          recentTexts.add(prompt);
+
+          // Create EphemeralPrompt with the same structure as before
+          newPrompts.push({
+            templateId: templateId,
+            templateSignature: debug.tokenCount > 0 ? 'UTA-GENERATED' : 'EMPTY',
+            text: prompt,
+            bindings: [], // Prompter doesn't provide detailed bindings yet
+            randomSeed: String(Math.floor(Math.random() * 1e9)),
+          });
+        } catch (error) {
+          console.warn('Prompter generation failed:', error);
+          continue;
+        }
+      }
+
       setEphemeralPrompts(newPrompts);
     } catch (error) {
       onError(error instanceof Error ? error.message : 'Failed to generate prompts');

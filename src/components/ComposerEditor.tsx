@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import type { TemplateDoc, TemplateBlock, TextBlock, PhraseBlock, PhraseToken, MorphFeature } from '../types';
+import type { TemplateDoc, TemplateBlock, TextBlock, PhraseBlock, PhraseToken, MorphFeature, POS, TemplateToken } from '../types';
 import { parseTML, serializeTML } from '../lib/tml';
 import { analyzeFreeText, resolvePhraseTokens, generateFromDocAsync } from '../lib/composer';
 
@@ -14,9 +14,171 @@ type MorphMenuState = {
 interface Props {
   sessionId: string;
   graph?: any;
+  ctx?: {
+    words: any[];
+    chunks: any[];
+    phrases: any[];
+  };
 }
 
-export default function ComposerEditor({ sessionId, graph }: Props) {
+const POS_CHIPS: POS[] = [
+  'NOUN', 
+  'VERB', 
+  'ADJ', 
+  'ADV', 
+  'ADP', 
+  'DET', 
+  'PRON', 
+  'PROPN', 
+  'AUX'
+];
+
+// NOTE: Do not "optimize" this back to the legacy behavior.
+// This parser must hydrate slot tokens with POS (and optional bind/morph)
+// and must FLATTEN multi-POS patterns (e.g., [NOUN-VERB]) into real tokens.
+export const parseTextPatternsToUTA = async (doc: TemplateDoc, graph: any): Promise<TemplateDoc> => {
+  const parsedBlocks: TemplateBlock[] = [];
+
+  for (const block of doc.blocks) {
+    if (block.kind === 'text') {
+      const textBlock = block as TextBlock;
+      const text = textBlock.text;
+
+      // Match bracketed patterns, including digits (bind ids) and morphs via colon.
+      // Examples accepted:
+      //  [NOUN-VERB-NOUN]
+      //  [DET] [NOUN] [NOUN2]
+      //  [VERB:participle] [ADJ] [PROPN1]
+      const patternRegex = /\[([A-Za-z0-9:]+(?:-[A-Za-z0-9:]+)*)\]/g;
+      const hasPatterns = patternRegex.test(text);
+
+      if (hasPatterns) {
+        // Reset regex for parsing
+        patternRegex.lastIndex = 0;
+        const tplTokens: TemplateToken[] = [];
+        let lastIndex = 0;
+        let match;
+
+        while ((match = patternRegex.exec(text)) !== null) {
+          // Add literal text before the pattern
+          if (match.index > lastIndex) {
+            const literalText = text.slice(lastIndex, match.index).trim();
+            if (literalText) {
+              tplTokens.push({
+                kind: 'literal',
+                surface: literalText
+              });
+            }
+          }
+
+          // Parse the pattern
+          const pattern = match[1];
+          const posTags = pattern.split('-');
+
+          if (posTags.length === 1) {
+            // Single POS slot like [NOUN]
+            const raw = posTags[0];
+            const m = /^([A-Za-z]+)(\d+)?(?::([A-Za-z]+))?$/u.exec(raw);
+            const base = (m?.[1] ?? 'NOUN').toUpperCase();
+            const bind = m?.[2];
+            const morph = m?.[3]?.toLowerCase();
+            // Special shorthand: allow lone "participle" -> VERB:participle
+            const pos = base === 'PARTICIPLE' ? 'VERB' : base;
+            tplTokens.push({
+              kind: 'slot',
+              pos: pos as any,
+              morph: morph as any,
+              bindId: bind
+            });
+          } else {
+            // Multi-POS chunk like [VERB-DET-NOUN]
+            // Keep original hyphen joiner by inserting literal '-' between slots.
+            const chunkTokens: TemplateToken[] = [];
+            posTags.forEach((raw, idx) => {
+              const m = /^([A-Za-z]+)(\d+)?(?::([A-Za-z]+))?$/u.exec(raw);
+              const base = (m?.[1] ?? 'NOUN').toUpperCase();
+              const bind = m?.[2];
+              const morph = m?.[3]?.toLowerCase();
+              const pos = base === 'PARTICIPLE' ? 'VERB' : base;
+              chunkTokens.push({
+                kind: 'slot',
+                pos: pos as any,
+                morph: morph as any,
+                bindId: bind
+              });
+              if (idx < posTags.length - 1) {
+                chunkTokens.push({
+                  kind: 'literal',
+                  surface: '-'  // preserve hyphen joiner
+                });
+              }
+            });
+            // FLATTEN the chunk into the outer token stream (no opaque subtemplate)
+            tplTokens.push(...chunkTokens);
+          }
+
+          lastIndex = match.index + match[0].length;
+        }
+
+        // Add remaining literal text
+        if (lastIndex < text.length) {
+          const literalText = text.slice(lastIndex).trim();
+          if (literalText) {
+            tplTokens.push({
+              kind: 'literal',
+              surface: literalText
+            });
+          }
+        }
+
+        // Create ONLY a phrase block with parsed tokens (no text block)
+        if (tplTokens.length > 0) {
+          // Map template tokens to PhraseBlock tokens with POS fully hydrated.
+          const phraseTokens = tplTokens.flatMap((t) => {
+            if (t.kind === 'literal') {
+              return [{
+                text: t.surface,
+                randomize: false,
+                slotLabel: null,
+                lemma: t.surface,
+                morph: null
+              } as PhraseToken];
+            }
+            // Slot token → randomized phrase token with POS (and optional bind/morph)
+            return [{
+              text: `[${t.pos}]`,
+              lemma: '',
+              pos: (t.pos as any),
+              posSet: [t.pos as any],
+              randomize: true,
+              slotLabel: (t as any).bindId ?? null,
+              morph: (t as any).morph ?? null
+            } as PhraseToken];
+          });
+
+          parsedBlocks.push({
+            kind: 'phrase',
+            phraseText: text,
+            tokens: phraseTokens
+          } as PhraseBlock);
+        }
+      } else {
+        // No patterns, keep as text block
+        parsedBlocks.push(block);
+      }
+    } else {
+      // Keep other blocks as-is
+      parsedBlocks.push(block);
+    }
+  }
+
+  return {
+    ...doc,
+    blocks: parsedBlocks
+  };
+};
+
+export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
   const [doc, setDoc] = useState<TemplateDoc>(() => ({
     id: `doc_${sessionId}`,
     blocks: [{ kind: 'text', text: '' }] as TemplateBlock[],
@@ -25,10 +187,28 @@ export default function ComposerEditor({ sessionId, graph }: Props) {
   const [preview, setPreview] = useState<string>('');
   const [morphMenu, setMorphMenu] = useState<MorphMenuState>(null);
 
+  // Get unique chunks from context, filtered by pattern
+  const chunks = useMemo(() => {
+    console.log('🔍 ComposerEditor: ctx.chunks:', ctx?.chunks);
+    if (!ctx?.chunks) return [];
+    // Filter to show only unique patterns
+    const uniqueChunks = new Map();
+    ctx.chunks.forEach(chunk => {
+      if (!uniqueChunks.has(chunk.posPattern)) {
+        uniqueChunks.set(chunk.posPattern, chunk);
+      }
+    });
+    const result = Array.from(uniqueChunks.values());
+    console.log('🔍 ComposerEditor: unique chunks:', result);
+    return result;
+  }, [ctx?.chunks]);
+
   // ===== Stable preview =====
   useEffect(() => {
     (async () => {
-      const s = await generateFromDocAsync(doc, { graph });
+      // Parse text patterns into UTA format
+      const parsedDoc = await parseTextPatternsToUTA(doc, graph);
+      const s = await generateFromDocAsync(parsedDoc, { graph });
       setPreview(s);
     })();
   }, [doc, graph]);
@@ -129,22 +309,76 @@ export default function ComposerEditor({ sessionId, graph }: Props) {
     }));
   };
 
+  // Add a POS slot to the current text block
+  const addPOSSlot = (pos: POS) => {
+    setDoc(d => {
+      const copy = structuredClone(d);
+      // Ensure we have a text block
+      if (!copy.blocks.length || copy.blocks[0].kind !== 'text') {
+        copy.blocks.unshift({ kind: 'text', text: '' } as TextBlock);
+      }
+      
+      const textBlock = copy.blocks[0] as TextBlock;
+      // Add the POS slot to the text
+      const slotText = `[${pos}]`;
+      textBlock.text = textBlock.text + (textBlock.text ? ' ' : '') + slotText;
+      
+      // Re-analyze the text to update the analysis
+      analyzeFreeText(textBlock.text, graph).then(analysis => {
+        textBlock.analysis = analysis;
+      });
+      
+      return copy;
+    });
+  };
+
+  // Add a chunk to the current text block (same as phrases)
+  const addChunk = async (chunk: any) => {
+    // Use the chunk's actual text content, not just the POS pattern
+    const chunkText = chunk.text || `[${chunk.posPattern}]`;
+    const tokens = await resolvePhraseTokens(chunkText, graph);
+    setDoc(d => ({
+      ...d,
+      blocks: [...d.blocks, { kind: 'phrase', phraseText: chunkText, tokens } as PhraseBlock],
+    }));
+  };
+
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex gap-4">
         {/* Tray */}
         <div className="w-64 shrink-0">
-          <div className="mb-2 text-sm font-semibold">Phrase Tray</div>
-          <div className="flex flex-col gap-2">
+          <div className="mb-2 text-sm font-semibold">Phrases</div>
+          <div className="max-h-48 overflow-y-auto space-y-2 mb-4">
             {demoTray.map((p, idx) => (
               <button
                 key={idx}
-                className="text-left rounded border bg-white px-2 py-1 hover:bg-slate-50"
+                className="text-left rounded border bg-white px-2 py-1 hover:bg-slate-50 w-full"
                 onClick={() => addTrayPhrase(p)}
               >
                 {p}
               </button>
             ))}
+          </div>
+          
+          <div className="mb-2 text-sm font-semibold">Chunks</div>
+          <div className="max-h-48 overflow-y-auto space-y-2">
+            {chunks.length > 0 ? (
+              chunks.map((chunk, idx) => (
+                <button
+                  key={idx}
+                  className="text-left rounded border bg-white px-2 py-1 hover:bg-slate-50 w-full"
+                  onClick={() => addChunk(chunk)}
+                  title={chunk.text}
+                >
+                  <div className="font-medium text-sm">{chunk.posPattern}</div>
+                  <div className="text-xs text-gray-500 truncate">{chunk.text}</div>
+                </button>
+              ))
+            ) : (
+              <div className="text-sm text-gray-500 italic">No chunks available</div>
+            )}
           </div>
         </div>
         {/* Inline composer (read-only visual) */}
@@ -159,6 +393,22 @@ export default function ComposerEditor({ sessionId, graph }: Props) {
               )
             )}
           </div>
+          {/* POS Chips */}
+          <div className="mt-3">
+            <div className="mb-2 text-sm font-medium">Add POS Slots</div>
+            <div className="flex flex-wrap gap-2">
+              {POS_CHIPS.map(pos => (
+                <button
+                  key={pos}
+                  className="px-3 py-1 rounded-full border border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors text-sm font-medium"
+                  onClick={() => addPOSSlot(pos)}
+                >
+                  + {pos}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Controls */}
           <div className="mt-3 flex flex-col gap-3">
             <div>
@@ -166,7 +416,49 @@ export default function ComposerEditor({ sessionId, graph }: Props) {
               <textarea
                 className="w-full min-h-[72px] rounded border bg-white p-2"
                 placeholder="Type literal text here…"
-                value={(doc.blocks[0] && doc.blocks[0].kind === 'text') ? (doc.blocks[0] as TextBlock).text : ''}
+                value={(() => {
+                  // Build complete template in raw text form
+                  const templateParts: string[] = [];
+                  
+                  for (const block of doc.blocks) {
+                    if (block.kind === 'text') {
+                      // Text blocks - check if they contain patterns
+                      const textBlock = block as TextBlock;
+                      const text = textBlock.text;
+                      
+                      // Check if text contains patterns like [NOUN]
+                      const patternRegex = /\[([A-Z]+(?:-[A-Z]+)*)\]/g;
+                      if (patternRegex.test(text)) {
+                        // Text contains patterns, add as-is
+                        templateParts.push(text);
+                      } else {
+                        // Plain text, add as-is
+                        templateParts.push(text);
+                      }
+                    } else if (block.kind === 'phrase') {
+                      // Phrase blocks - reconstruct the raw template pattern
+                      const phraseBlock = block as PhraseBlock;
+                      const templatePattern = phraseBlock.tokens
+                        .map(token => {
+                          if (token.randomize && token.pos) {
+                            // This is a slot - show as {word^morph#label}
+                            const morph = token.morph && token.morph !== 'base' ? `^${token.morph}` : '';
+                            const label = token.slotLabel ? `#${token.slotLabel}` : '';
+                            return `{${token.text}${morph}${label}}`;
+                          } else {
+                            // This is literal text
+                            return token.text;
+                          }
+                        })
+                        .join(' ');
+                      templateParts.push(templatePattern);
+                    }
+                  }
+                  
+                  // Join all parts and wrap in brackets if there are multiple blocks or patterns
+                  const result = templateParts.join(' ');
+                  return result;
+                })()}
                 onChange={async (e) => {
                   const text = e.target.value;
                   const analysis = await analyzeFreeText(text, graph);

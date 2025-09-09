@@ -35,6 +35,29 @@ export async function realizeTemplate(input: FillInput): Promise<FillResult> {
   const binds = new Map<string, { surface: string; lemma?: string; pos: POS }>();
   const out: string[] = [];
 
+  function posCompatible(requested: POS | undefined, got: POS | undefined): boolean {
+    if (!requested || !got) return true;
+    if (requested === "PROPN") return got === "PROPN";        // PROPN only swaps with PROPN
+    if (requested === "NOUN")  return got !== "PROPN";        // NOUN must not receive PROPN
+    return requested === got;                                 // others must match exactly
+  }
+
+  async function repickStrict(input: FillInput, token: any): Promise<{ surface:string; lemma?:string; pos:POS }> {
+    // Try re-picking up to a few times via the existing policy
+    for (let i = 0; i < 5; i++) {
+      const attempt = await pickByPolicy(input, token.pos, token.selectionPolicy ?? POLICY_STANDARD, token.fallbackLiteral);
+      if (posCompatible(token.pos, attempt.pos)) return attempt;
+    }
+    // As a last resort, filter context by POS and pick a random compatible word
+    const pool = (input.ctx?.words ?? []).filter((w:any) => posCompatible(token.pos, w.pos));
+    if (pool.length) {
+      const w = pool[Math.floor(Math.random() * pool.length)];
+      return { surface: w.surface ?? w.text ?? w.lemma ?? "", lemma: w.lemma, pos: w.pos };
+    }
+    // If absolutely nothing compatible exists, fall back to original attempt (let caller render literal)
+    return { surface: token.fallbackLiteral ?? "", lemma: undefined, pos: token.pos };
+  }
+
   console.log('🔍 UTA DEBUG: Starting realizeTemplate');
   console.log('🔍 UTA DEBUG: Template tokens:', tpl.tokens);
   console.log('🔍 UTA DEBUG: Context words count:', input.ctx.words.length);
@@ -78,7 +101,10 @@ export async function realizeTemplate(input: FillInput): Promise<FillResult> {
     }
 
     // Choose by policy
-    const choice = await pickByPolicy(input, token.pos, policy, token.fallbackLiteral);
+    let choice = await pickByPolicy(input, token.pos, policy, token.fallbackLiteral);
+    if (!posCompatible(token.pos, choice.pos)) {
+      choice = await repickStrict(input, token);
+    }
     console.log('🔍 UTA DEBUG: Selected choice:', choice);
     const rendered = await morphRender(choice.surface, choice.lemma, token.pos, token.morph);
     console.log('🔍 UTA DEBUG: Rendered word:', rendered);
@@ -98,7 +124,7 @@ async function pickByPolicy(
   pos: POS,
   policy: SelectionSource[],
   fallbackLiteral?: string
-): Promise<{ surface: string; lemma?: string }> {
+): Promise<{ surface: string; lemma?: string; pos: POS }> {
   console.log('🔍 UTA DEBUG: pickByPolicy called with:', { pos, policy, fallbackLiteral });
   
   for (const src of policy) {
@@ -112,7 +138,7 @@ async function pickByPolicy(
   }
   
   console.log('🔍 UTA DEBUG: All sources failed, returning empty');
-  return { surface: '' };
+  return { surface: '', pos: pos };
 }
 
 function selectFromSource(
@@ -120,7 +146,7 @@ function selectFromSource(
   input: FillInput,
   pos: POS,
   fallbackLiteral?: string
-): { surface: string; lemma?: string } | null {
+): { surface: string; lemma?: string; pos: POS } | null {
   const { ctx, lockedSet, wordBank } = input;
 
   if (src === 'LOCKED') {
@@ -130,7 +156,7 @@ function selectFromSource(
     const w = pickWord(pool);
     if (w) {
       console.log('🔍 UTA DEBUG: LOCKED found word:', w.text);
-      return { surface: w.text, lemma: w.lemma };
+      return { surface: w.text, lemma: w.lemma, pos: pos };
     }
     console.log('🔍 UTA DEBUG: LOCKED no matches');
     return null;
@@ -164,7 +190,7 @@ function selectFromSource(
     const w = pickWord(pool);
     if (w) {
       console.log('🔍 UTA DEBUG: CONTEXT found word:', w.text);
-      return { surface: w.text, lemma: w.lemma };
+      return { surface: w.text, lemma: w.lemma, pos: pos };
     }
     console.log('🔍 UTA DEBUG: CONTEXT no matches');
     return null;
@@ -174,7 +200,7 @@ function selectFromSource(
     console.log('🔍 UTA DEBUG: LITERAL source - fallbackLiteral:', fallbackLiteral);
     if (fallbackLiteral) {
       console.log('🔍 UTA DEBUG: LITERAL using fallback:', fallbackLiteral);
-      return { surface: fallbackLiteral };
+      return { surface: fallbackLiteral, pos: pos };
     }
     console.log('🔍 UTA DEBUG: LITERAL no fallback available');
     return null;
@@ -191,7 +217,7 @@ function selectFromSource(
   if (fb && fb.length) {
     const selected = pickString(fb);
     console.log('🔍 UTA DEBUG: BANK selected word:', selected);
-    return { surface: selected };
+    return { surface: selected, pos: pos };
   }
   console.log('🔍 UTA DEBUG: BANK no words available');
   return null;

@@ -4,9 +4,55 @@ import { persistenceManager } from './lib/persistence.js';
 import IngestView from './components/IngestView.jsx';
 import ExploreView from './components/ExploreView.jsx';
 import PromptView from './components/PromptView.jsx';
+import PrompterDevPanel from './components/PrompterDevPanel.tsx';
 import { ActiveNodesProvider } from './contexts/ActiveNodesContext.jsx';
+import { getAvailableTemplates } from './lib/promptEngine.js';
+import { useActiveNodesWithGraph } from './contexts/ActiveNodesContext.js';
+import type { TemplateDoc } from './types/index.js';
 
-type ViewType = 'ingest' | 'explore' | 'prompt';
+type ViewType = 'ingest' | 'explore' | 'prompt' | 'dev';
+
+// Wrapper component to provide template source for PrompterDevPanel
+function DevPanelWrapper({ graph, onGraphUpdate, onError }: { 
+  graph: SemanticGraphLite; 
+  onGraphUpdate: () => void; 
+  onError: (error: string) => void; 
+}) {
+  const { ctx, contextFrame } = useActiveNodesWithGraph(graph);
+  
+  // Create template source from available templates
+  const templateSource = async (): Promise<TemplateDoc[]> => {
+    if (!contextFrame?.sessionId) return [];
+    
+    try {
+      const templates = getAvailableTemplates(ctx, contextFrame.sessionId);
+      return templates.map(tpl => ({
+        id: tpl.id,
+        blocks: [{
+          kind: 'text' as const,
+          text: tpl.text || '',
+          analysis: undefined
+        }],
+        createdInSessionId: contextFrame.sessionId
+      }));
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to load templates');
+      return [];
+    }
+  };
+
+  return (
+    <PrompterDevPanel 
+      source={templateSource}
+      graph={graph}
+      bank={{
+        ADJ: ['zesty', 'curious', 'bright', 'mysterious'],
+        NOUN: ['idea', 'concept', 'thought', 'notion'],
+        VERB: ['explore', 'discover', 'create', 'imagine']
+      }}
+    />
+  );
+}
 
 function App() {
   const [graph, setGraph] = useState<SemanticGraphLite>(new SemanticGraphLite());
@@ -140,6 +186,7 @@ function App() {
               { id: 'ingest', label: 'Ingest', description: 'Add phrases and extract chunks' },
               { id: 'explore', label: 'Explore', description: 'Find related phrases and create prompts' },
               { id: 'prompt', label: 'Prompt', description: 'Generate and respond to prompts' },
+              { id: 'dev', label: 'Dev Panel', description: 'Template mutation playground' },
             ].map(({ id, label, description }) => (
               <button
                 key={id}
@@ -194,6 +241,13 @@ function App() {
           )}
           {currentView === 'prompt' && (
             <PromptView 
+              graph={graph} 
+              onGraphUpdate={handleGraphUpdate}
+              onError={setError}
+            />
+          )}
+          {currentView === 'dev' && (
+            <DevPanelWrapper 
               graph={graph} 
               onGraphUpdate={handleGraphUpdate}
               onError={setError}

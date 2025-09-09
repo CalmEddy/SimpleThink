@@ -245,7 +245,7 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
       </div>
 
       {mode === 'composer' ? (
-        <ComposerEditor sessionId={sessionId} graph={graph} />
+        <ComposerEditor sessionId={sessionId} graph={graph} ctx={ctx} />
       ) : (
         <>
 
