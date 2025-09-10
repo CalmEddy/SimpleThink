@@ -177,6 +177,16 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
   const [useEnsure2, setUseEnsure2] = useState<boolean>(true);
   const [useRandNouns, setUseRandNouns] = useState<boolean>(false);
 
+  // Advanced slot randomization controls
+  const [useMaxRandomization, setUseMaxRandomization] = useState<boolean>(false);
+  const [maxRandomSlots, setMaxRandomSlots] = useState<number>(2);
+  const [usePositionBasedRandom, setUsePositionBasedRandom] = useState<boolean>(false);
+  const [targetPOS, setTargetPOS] = useState<POS>('NOUN');
+  const [targetPosition, setTargetPosition] = useState<number>(1); // 1st, 2nd, etc.
+  const [useClickableSelection, setUseClickableSelection] = useState<boolean>(false);
+  const [selectedPhrase, setSelectedPhrase] = useState<any>(null);
+  const [selectedWordIndices, setSelectedWordIndices] = useState<Set<number>>(new Set());
+
   // POS-based randomization config
   const [posRandomP, setPosRandomP] = useState<Record<POS, number>>(
     () => ALL_POS.reduce((acc, pos) => (acc[pos] = 0, acc), {} as Record<POS, number>)
@@ -281,6 +291,79 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
     if (useEnsure2) result.push(mutatorEnsure2Random);
     if (useRandNouns) result.push(mutatorRandomizeNouns);
 
+    // Advanced slot randomization mutators
+    if (useMaxRandomization) {
+      result.push(function maxRandomizationMutator(doc) {
+        const blocks = doc.blocks.map((b: TemplateBlock) => {
+          if (b.kind !== "phrase") return b;
+          const pb = b as PhraseBlock;
+          const randomizableTokens = pb.tokens
+            .map((t, i) => ({ token: t, index: i }))
+            .filter(({ token }) => /[A-Za-z]/.test(token.text) && !token.randomize);
+          
+          // Randomly select up to maxRandomSlots tokens to randomize
+          const toRandomize = Math.min(maxRandomSlots, randomizableTokens.length);
+          const selected = new Set<number>();
+          while (selected.size < toRandomize && selected.size < randomizableTokens.length) {
+            const randomIndex = Math.floor(Math.random() * randomizableTokens.length);
+            selected.add(randomizableTokens[randomIndex].index);
+          }
+          
+          const tokens = pb.tokens.map((t, i) => 
+            selected.has(i) ? { ...t, randomize: true } : t
+          );
+          return { ...pb, tokens } as PhraseBlock;
+        });
+        return { ...doc, blocks };
+      });
+    }
+
+    if (usePositionBasedRandom) {
+      result.push(function positionBasedRandomMutator(doc) {
+        const blocks = doc.blocks.map((b: TemplateBlock) => {
+          if (b.kind !== "phrase") return b;
+          const pb = b as PhraseBlock;
+          
+          // Find tokens matching the target POS
+          const matchingTokens = pb.tokens
+            .map((t, i) => ({ token: t, index: i }))
+            .filter(({ token }) => 
+              token.pos === targetPOS || (token.posSet && token.posSet.includes(targetPOS))
+            );
+          
+          // Select the token at the target position (1-based)
+          if (matchingTokens.length >= targetPosition) {
+            const targetIndex = matchingTokens[targetPosition - 1].index;
+            const tokens = pb.tokens.map((t, i) => 
+              i === targetIndex ? { ...t, randomize: true } : t
+            );
+            return { ...pb, tokens } as PhraseBlock;
+          }
+          
+          return pb;
+        });
+        return { ...doc, blocks };
+      });
+    }
+
+    if (useClickableSelection && selectedPhrase && selectedWordIndices.size > 0) {
+      result.push(function clickableSelectionMutator(doc) {
+        const blocks = doc.blocks.map((b: TemplateBlock) => {
+          if (b.kind !== "phrase") return b;
+          const pb = b as PhraseBlock;
+          
+          // Only apply to the selected phrase
+          if (pb.phraseText !== selectedPhrase.text) return pb;
+          
+          const tokens = pb.tokens.map((t, i) => 
+            selectedWordIndices.has(i) ? { ...t, randomize: true } : t
+          );
+          return { ...pb, tokens } as PhraseBlock;
+        });
+        return { ...doc, blocks };
+      });
+    }
+
     // POS-based randomization mutator
     const anyPOS = ALL_POS.some(pos => (posRandomP[pos] ?? 0) > 0);
     if (anyPOS) {
@@ -325,7 +408,7 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
     }
 
     return result;
-  }, [useJitter, jitterP, useAutoBind, useEnsure2, useRandNouns, posRandomP, regexText, regexRandomizeP]);
+  }, [useJitter, jitterP, useAutoBind, useEnsure2, useRandNouns, useMaxRandomization, maxRandomSlots, usePositionBasedRandom, targetPOS, targetPosition, useClickableSelection, selectedPhrase, selectedWordIndices, posRandomP, regexText, regexRandomizeP]);
 
   // --------- Helpers: normalize & validate pattern input ---------
   function normalizePatternInput(raw: string): { ok: boolean; normalized?: string; msg?: string } {
@@ -470,6 +553,7 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="seed">Seed (optional)</Label>
+                <p className="text-xs text-gray-500">→ <code>Prompter.rng</code> (seedrandom)</p>
                 <Input id="seed" value={seed} onChange={(e) => setSeed(e.target.value)} placeholder="e.g. session-42" />
               </div>
               <div className="flex flex-col gap-2">
@@ -480,7 +564,10 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                   Copy Prompt
                 </Button>
                 <div className="flex items-center gap-2">
-                  <Label className="text-xs">Use Active Pool</Label>
+                  <div>
+                    <Label className="text-xs">Use Active Pool</Label>
+                    <p className="text-xs text-gray-500">→ <code>activeSource</code> vs <code>source</code></p>
+                  </div>
                   <Switch checked={useActivePool} onCheckedChange={setUseActivePool} />
                 </div>
                 {prompt && (
@@ -534,6 +621,9 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
             <Card className="border-dashed">
               <CardHeader>
                 <CardTitle className="text-base">Available Patterns (Active Pool)</CardTitle>
+                <p className="text-xs text-gray-600 mt-1">
+                  Controls: <code>activeCtx.phrases</code>, <code>activeCtx.chunks</code> → <code>Prompter.source</code>
+                </p>
               </CardHeader>
               <CardContent className="space-y-3">
                 <div className="flex items-end gap-3">
@@ -612,6 +702,9 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
             <Card className="border-dashed">
               <CardHeader>
                 <CardTitle className="text-base">Build Template From Phrase</CardTitle>
+                <p className="text-xs text-gray-600 mt-1">
+                  Controls: <code>lockedDoc</code> → <code>Prompter.source</code> (overrides active pool)
+                </p>
               </CardHeader>
               <CardContent className="space-y-3">
                 <Label htmlFor="phrase">Paste a phrase (e.g., "dog chases scared cat")</Label>
@@ -658,12 +751,18 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
             <Card className="border-dashed">
               <CardHeader>
                 <CardTitle className="text-base">Built-in Mutators</CardTitle>
+                <p className="text-xs text-gray-600 mt-1">
+                  Controls: <code>configurableMutators</code> → <code>Prompter.mutators</code>
+                </p>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <Switch checked={useJitter} onCheckedChange={setUseJitter} />
-                    <span className="font-medium">Jitter Slots</span>
+                    <div>
+                      <span className="font-medium">Jitter Slots</span>
+                      <p className="text-xs text-gray-500">→ <code>mutatorJitter30</code> + <code>utils.jitterSlots()</code></p>
+                    </div>
                   </div>
                   <div className="w-48">
                     <Label className="text-xs">Flip Probability: {jitterP}%</Label>
@@ -673,20 +772,147 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <Switch checked={useAutoBind} onCheckedChange={setUseAutoBind} />
-                    <span className="font-medium">Auto Bind (slot reuse)</span>
+                    <div>
+                      <span className="font-medium">Auto Bind (slot reuse)</span>
+                      <p className="text-xs text-gray-500">→ <code>mutatorAutoBind</code> + <code>utils.autoBind()</code></p>
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <Switch checked={useEnsure2} onCheckedChange={setUseEnsure2} />
-                    <span className="font-medium">Ensure ≥ 2 randomized tokens</span>
+                    <div>
+                      <span className="font-medium">Ensure ≥ 2 randomized tokens</span>
+                      <p className="text-xs text-gray-500">→ <code>mutatorEnsure2Random</code> + <code>utils.ensureRandomizedMin()</code></p>
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <Switch checked={useRandNouns} onCheckedChange={setUseRandNouns} />
-                    <span className="font-medium">Randomize all NOUN tokens</span>
+                    <div>
+                      <span className="font-medium">Randomize all NOUN tokens</span>
+                      <p className="text-xs text-gray-500">→ <code>mutatorRandomizeNouns</code></p>
+                    </div>
                   </div>
+                </div>
+
+                {/* Advanced Slot Randomization Controls */}
+                <div className="border-t pt-4 mt-4">
+                  <h4 className="text-sm font-semibold text-gray-700 mb-3">Advanced Slot Randomization</h4>
+                  
+                  {/* Max Randomization Control */}
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <Switch checked={useMaxRandomization} onCheckedChange={setUseMaxRandomization} />
+                      <div>
+                        <span className="font-medium">Max Randomization</span>
+                        <p className="text-xs text-gray-500">→ <code>maxRandomizationMutator</code></p>
+                      </div>
+                    </div>
+                    <div className="w-32">
+                      <Label className="text-xs">Max slots: {maxRandomSlots}</Label>
+                      <Slider value={[maxRandomSlots]} onValueChange={(v) => setMaxRandomSlots(v[0] ?? 2)} max={10} step={1} />
+                    </div>
+                  </div>
+
+                  {/* Position-based Randomization Control */}
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <Switch checked={usePositionBasedRandom} onCheckedChange={setUsePositionBasedRandom} />
+                      <div>
+                        <span className="font-medium">Position-based Random</span>
+                        <p className="text-xs text-gray-500">→ <code>positionBasedRandomMutator</code></p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select 
+                        value={targetPOS} 
+                        onChange={(e) => setTargetPOS(e.target.value as POS)}
+                        className="text-xs border rounded px-2 py-1"
+                      >
+                        {ALL_POS.map(pos => (
+                          <option key={pos} value={pos}>{pos}</option>
+                        ))}
+                      </select>
+                      <span className="text-xs">position:</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="5"
+                        value={targetPosition}
+                        onChange={(e) => setTargetPosition(parseInt(e.target.value) || 1)}
+                        className="w-12 text-xs border rounded px-1 py-1"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Clickable Selection Control */}
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-3">
+                      <Switch checked={useClickableSelection} onCheckedChange={setUseClickableSelection} />
+                      <div>
+                        <span className="font-medium">Clickable Selection</span>
+                        <p className="text-xs text-gray-500">→ <code>clickableSelectionMutator</code></p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Phrase Selection for Clickable Mode */}
+                  {useClickableSelection && (
+                    <div className="mt-3 p-3 bg-gray-50 rounded">
+                      <Label className="text-xs font-medium">Select Phrase for Clickable Randomization</Label>
+                      <div className="mt-2 max-h-32 overflow-auto space-y-1">
+                        {(activeCtx?.phrases ?? []).slice(0, 10).map((ph: any) => (
+                          <button
+                            key={ph.id}
+                            onClick={() => setSelectedPhrase(ph)}
+                            className={`w-full text-left p-2 rounded text-sm ${
+                              selectedPhrase?.id === ph.id 
+                                ? 'bg-blue-100 border border-blue-300' 
+                                : 'bg-white border border-gray-200 hover:bg-gray-50'
+                            }`}
+                          >
+                            <div className="font-medium">{ph.text}</div>
+                            <div className="text-xs text-gray-500">POS: {ph.posPattern}</div>
+                          </button>
+                        ))}
+                      </div>
+                      
+                      {/* Word Selection Chips */}
+                      {selectedPhrase && (
+                        <div className="mt-3">
+                          <Label className="text-xs font-medium">Click words to randomize:</Label>
+                          <div className="flex flex-wrap gap-1 mt-2">
+                            {selectedPhrase.text.split(' ').map((word: string, index: number) => (
+                              <button
+                                key={index}
+                                onClick={() => {
+                                  const newSelected = new Set(selectedWordIndices);
+                                  if (newSelected.has(index)) {
+                                    newSelected.delete(index);
+                                  } else {
+                                    newSelected.add(index);
+                                  }
+                                  setSelectedWordIndices(newSelected);
+                                }}
+                                className={`px-2 py-1 rounded text-xs border ${
+                                  selectedWordIndices.has(index)
+                                    ? 'bg-blue-500 text-white border-blue-500'
+                                    : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                                }`}
+                              >
+                                {word}
+                              </button>
+                            ))}
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1">
+                            Selected: {selectedWordIndices.size} word(s)
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -695,6 +921,9 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
             <Card className="border-dashed">
               <CardHeader>
                 <CardTitle className="text-base">POS-based Randomization</CardTitle>
+                <p className="text-xs text-gray-600 mt-1">
+                  Controls: <code>posRandomP</code> → custom mutator in <code>configurableMutators</code>
+                </p>
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm text-gray-600">Set probability per POS to force tokens of that POS to randomize.</p>
@@ -726,6 +955,9 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
             <Card className="border-dashed">
               <CardHeader>
                 <CardTitle className="text-base">Build Template From Pattern</CardTitle>
+                <p className="text-xs text-gray-600 mt-1">
+                  Controls: <code>patternInput</code> → <code>lockedDoc</code> → <code>Prompter.source</code>
+                </p>
               </CardHeader>
               <CardContent className="space-y-3">
                 <Label htmlFor="pattern">Type a POS pattern (e.g., <code>[NOUN-VERB-NOUN]</code>)</Label>
@@ -768,6 +1000,9 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
             <Card className="border-dashed">
               <CardHeader>
                 <CardTitle className="text-base">Phrase Pattern Randomization (Regex)</CardTitle>
+                <p className="text-xs text-gray-600 mt-1">
+                  Controls: <code>regexText</code>, <code>regexRandomizeP</code> → custom mutator in <code>configurableMutators</code>
+                </p>
               </CardHeader>
               <CardContent className="space-y-2">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">

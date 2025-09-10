@@ -187,6 +187,13 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
   const [preview, setPreview] = useState<string>('');
   const [morphMenu, setMorphMenu] = useState<MorphMenuState>(null);
 
+  // Get phrases from context
+  const phrases = useMemo(() => {
+    console.log('🔍 ComposerEditor: ctx.phrases:', ctx?.phrases);
+    if (!ctx?.phrases) return [];
+    return ctx.phrases;
+  }, [ctx?.phrases]);
+
   // Get unique chunks from context, filtered by pattern
   const chunks = useMemo(() => {
     console.log('🔍 ComposerEditor: ctx.chunks:', ctx?.chunks);
@@ -213,17 +220,6 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
     })();
   }, [doc, graph]);
 
-  // ==== Phrase tray demo (replace with your real tray if needed) ====
-  const demoTray = useMemo(
-    () => [
-      'Life is a circus, but the clowns are running late.',
-      'Life is a parade where the tuba always drowns you out.',
-      'Life is a board game missing three dice and most of the instructions.',
-      'Life is a pizza delivery that shows up cold but still charges extra.',
-      'Life is a soap bubble—shiny, fun, and always one sneeze away from ending.',
-    ],
-    []
-  );
 
   // === Token interactions (stable)
   const onTokenClick = (bi: number, ti: number, e: React.MouseEvent) => {
@@ -351,15 +347,21 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
         <div className="w-64 shrink-0">
           <div className="mb-2 text-sm font-semibold">Phrases</div>
           <div className="max-h-48 overflow-y-auto space-y-2 mb-4">
-            {demoTray.map((p, idx) => (
-              <button
-                key={idx}
-                className="text-left rounded border bg-white px-2 py-1 hover:bg-slate-50 w-full"
-                onClick={() => addTrayPhrase(p)}
-              >
-                {p}
-              </button>
-            ))}
+            {phrases.length > 0 ? (
+              phrases.map((phrase, idx) => (
+                <button
+                  key={idx}
+                  className="text-left rounded border bg-white px-2 py-1 hover:bg-slate-50 w-full"
+                  onClick={() => addTrayPhrase(phrase.text)}
+                  title={phrase.text}
+                >
+                  <div className="font-medium text-sm">{phrase.text}</div>
+                  <div className="text-xs text-gray-500 mt-1">POS: {phrase.posPattern}</div>
+                </button>
+              ))
+            ) : (
+              <div className="text-sm text-gray-500 italic">No phrases available</div>
+            )}
           </div>
           
           <div className="mb-2 text-sm font-semibold">Chunks</div>

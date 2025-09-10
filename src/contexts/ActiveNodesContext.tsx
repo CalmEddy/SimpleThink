@@ -48,10 +48,11 @@ export const useActiveNodes = () => {
 // Then access: ctx.phrases, ctx.words, ctx.chunks, ctx.patterns, ctx.prompts, ctx.responses, ctx.entities
 export const useActiveNodesWithGraph = (graph: SemanticGraphLite) => {
   const activeNodes = useActiveNodes();
+  const { contextFrame } = activeNodes;
   
   const ctx = useMemo(() => {
     return activeNodes.getContextualNodes(graph);
-  }, [activeNodes, graph]);
+  }, [activeNodes, graph, contextFrame]);
 
   return {
     ...activeNodes,
@@ -111,7 +112,9 @@ export const ActiveNodesProvider: React.FC<ActiveNodesProviderProps> = ({ childr
   }, [contextFrame]);
 
   const getContextualNodes = useCallback((graph: SemanticGraphLite): ContextualNodeSets => {
+    console.log('🔍 getContextualNodes called with contextFrame:', contextFrame);
     if (!contextFrame || !contextFrame.topicId) {
+      console.log('🔍 No contextFrame or topicId, returning empty context');
       return {
         phrases: [],
         words: [],
@@ -125,6 +128,7 @@ export const ActiveNodesProvider: React.FC<ActiveNodesProviderProps> = ({ childr
 
     // Get all edges to find contextual relationships
     const edges = graph.getEdges();
+    console.log('🔍 Total edges:', edges.length);
     
     // Find phrases linked to current topic (session edges are not required)
     const contextualPhraseIds = new Set<string>();
@@ -132,13 +136,31 @@ export const ActiveNodesProvider: React.FC<ActiveNodesProviderProps> = ({ childr
       if (edge.type === 'PHRASE_ABOUT_TOPIC' && 
           edge.to === contextFrame.topicId && 
           edge.from && edge.to) { // Filter out corrupted edges with undefined IDs
+        console.log('🔍 Found PHRASE_ABOUT_TOPIC edge:', edge.from, '->', edge.to);
         contextualPhraseIds.add(edge.from);
       }
     });
+    console.log('🔍 Found contextual phrase IDs:', Array.from(contextualPhraseIds));
 
     // Get contextual phrases
     const allPhrases = graph.getNodesByType('PHRASE') as PhraseNode[];
+    console.log('🔍 Total phrases in graph:', allPhrases.length);
     const phrases = allPhrases.filter(phrase => contextualPhraseIds.has(phrase.id));
+    console.log('🔍 Contextual phrases found:', phrases.length, phrases.map(p => p.text));
+    
+    // If no phrases are linked to this topic, return empty arrays (will show "New Topic" in UI)
+    if (phrases.length === 0) {
+      console.log('🔍 No topic-specific phrases found, returning empty context for new topic');
+      return {
+        phrases: [],
+        words: [],
+        chunks: [],
+        patterns: [],
+        prompts: [],
+        responses: [],
+        entities: []
+      };
+    }
 
     // Extract words from contextual phrases
     const wordIds = new Set<string>();
