@@ -2,14 +2,14 @@ import { BindingSpec, TemplateToken, UnifiedTemplate, POS, MorphFeature } from '
 
 const SLOT_RE = /^\[([A-Z:]+)(\d+)?\]$/;                 // [NOUN], [VERB:past], [NOUN1]
 const LIT_RE  = /^\[LIT:(.+?)\]$/;                        // [LIT:life]
-const CHUNK_RE= /^\[CHUNK:\[(.+?)\]\]$/;                  // [CHUNK:[ADJ NOUN]]
+const CHUNK_RE= /^\[CHUNK:\[([A-Za-z0-9:-]+)\]\]$/;        // [CHUNK:[ADJ-NOUN]]
 
 /**
  * Parse a canonical DSL string into TemplateTokens.
  * Supported forms:
  *  - [NOUN], [VERB:past], [NOUN1], [ADJ1:comparative]
  *  - [LIT:life]
- *  - [CHUNK:[ADJ NOUN]] (nested parse)
+ *  - [CHUNK:[ADJ-NOUN]] (nested parse)
  */
 export function parseTemplateTextToTokens(text: string): TemplateToken[] {
   // Tokenize by whitespace preserving bracketed groups.
@@ -25,8 +25,11 @@ export function parseTemplateTextToTokens(text: string): TemplateToken[] {
 
     const chunk = p.match(CHUNK_RE);
     if (chunk) {
-      const inner = `[${chunk[1]}]`.replace(/^\[/, '').replace(/\]$/, '');
-      const innerTokens = parseTemplateTextToTokens(inner);
+      // Convert hyphen-separated pattern to bracketed slots for individual parsing
+      const hyphenPattern = chunk[1]; // e.g., "ADJ-NOUN-NOUN"
+      const posTags = hyphenPattern.split('-'); // e.g., ["ADJ", "NOUN", "NOUN"]
+      const bracketedSlots = posTags.map(pos => `[${pos}]`).join(' '); // e.g., "[ADJ] [NOUN] [NOUN]"
+      const innerTokens = parseTemplateTextToTokens(bracketedSlots);
       tokens.push({ kind: 'subtemplate', tokens: innerTokens, raw: p });
       continue;
     }

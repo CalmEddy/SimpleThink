@@ -1,6 +1,7 @@
 import { parseTextPatternsToUTA } from "../../components/ComposerEditor";
 import { convertTemplateDocToUnified } from "../composer";
 import { realizeTemplate } from "../fillTemplate";
+import { wordBank } from "../templates.js";
 import type { UnifiedTemplate, POS, MorphFeature } from '../types/index.js';
 import type { TemplateDoc, TemplateBlock, PhraseBlock, PhraseToken } from '../types/index.js';
 import type { SemanticGraphLite, WordNode, PhraseNode } from '../semanticGraphLite.js';
@@ -239,7 +240,7 @@ export class Prompter {
     // Fail fast if any randomized token lacks POS
     this.assertNoRandomWithoutPOS(working);
 
-    // Reuse the exact same pipeline as Composer:
+    // Use original parseTextPatternsToUTA pipeline for TemplateDoc
     const parsed = await parseTextPatternsToUTA(working, ctx.graph);
     const unified: UnifiedTemplate = convertTemplateDocToUnified(parsed);
 
@@ -252,7 +253,7 @@ export class Prompter {
       tpl: unified,
       ctx: { words: contextWords, phrases: contextPhrases },
       lockedSet: new Set(),
-      wordBank: { ...(ctx.bank ?? {}) }
+      wordBank: { ...wordBank, ...(ctx.bank ?? {}) }
     } as any); // typed to your FillInput
 
     return {

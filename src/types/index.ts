@@ -293,3 +293,47 @@ export interface UnifiedTemplate {
 
 // Back-compat: keep old name compiling without behavior
 export type UserTemplate = UnifiedTemplate;
+
+// ===== Prompt Generation Profile types =====
+
+export interface PromptGenerationProfile {
+  id: string;
+  name: string;
+  description?: string;
+  createdInSessionId: string;
+  createdAt: number;
+  lastUsedAt?: number;
+  pinned?: boolean;
+  tags?: string[];
+  
+  // Basic mutator toggles
+  useJitter: boolean;
+  jitterP: number;
+  useAutoBind: boolean;
+  useEnsure2: boolean;
+  useRandNouns: boolean;
+  
+  // Advanced randomization controls
+  useMaxRandomization: boolean;
+  maxRandomSlots: number;
+  usePositionBasedRandom: boolean;
+  targetPOS: POS;
+  targetPosition: number;
+  useClickableSelection: boolean;
+  selectedPhraseId?: string;
+  selectedWordIndices: number[];
+  
+  // POS-based randomization probabilities
+  posRandomP: Record<POS, number>;
+  
+  // Regex-based randomization settings
+  regexText: string;
+  regexRandomizeP: number;
+  
+  // Source configuration
+  useActivePool: boolean;
+  lockedTemplateId?: string;
+  
+  // RNG seed
+  seed: string;
+}

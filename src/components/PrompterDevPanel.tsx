@@ -1,11 +1,21 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import seedrandom from "seedrandom";
-import type { TemplateDoc, TemplateBlock, PhraseBlock, PhraseToken, POS } from "../types/index.js";
+import type { TemplateDoc, TemplateBlock, PhraseBlock, PhraseToken, POS, PromptGenerationProfile } from "../types/index.js";
 import type { SemanticGraphLite } from "../lib/semanticGraphLite.js";
-import { Prompter, mutatorJitter30, mutatorAutoBind, mutatorEnsure2Random, mutatorRandomizeNouns, type TemplateSource, type TemplateMutator } from "../lib/prompter/index.js";
+import { Prompter, mutatorAutoBind, mutatorEnsure2Random, mutatorRandomizeNouns, type TemplateSource, type TemplateMutator } from "../lib/prompter/index.js";
 import { parseTextPatternsToUTA } from "./ComposerEditor";
-import { convertTemplateDocToUnified } from "../lib/composer";
 import { useActiveNodesWithGraph } from "../contexts/ActiveNodesContext";
+import { 
+  listSessionProfiles, 
+  addSessionProfile, 
+  removeSessionProfile, 
+  getSessionProfile,
+  createDefaultProfile,
+  duplicateProfile,
+  markProfileAsUsed,
+  getPinnedProfiles,
+  toggleProfilePinned
+} from "../lib/sessionProfiles.js";
 // NOTE: We intentionally avoid resolvePhraseTokens to prevent runtime errors.
 
 /**
@@ -166,6 +176,13 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
   // 🔗 Hook into the ACTIVE NODE POOL (same context Composer uses)
   const { ctx: activeCtx } = useActiveNodesWithGraph(graph as any);
   
+  // Profile management state
+  const [profiles, setProfiles] = useState<PromptGenerationProfile[]>([]);
+  const [currentProfileId, setCurrentProfileId] = useState<string | null>(null);
+  const [profileName, setProfileName] = useState<string>("");
+  const [profileDescription, setProfileDescription] = useState<string>("");
+  const [showProfileManager, setShowProfileManager] = useState<boolean>(false);
+  
   // Seed + RNG
   const [seed, setSeed] = useState<string>("");
   const rng = useMemo(() => (seed ? { next: seedrandom(seed) } : undefined), [seed]);
@@ -275,6 +292,141 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
   const [debug, setDebug] = useState<any>(null);
   const [chosenTemplateId, setChosenTemplateId] = useState<string>("");
   const [templateText, setTemplateText] = useState<string>("");
+
+  // Profile management functions
+  const sessionId = "devpanel"; // Use a fixed session ID for the dev panel
+  
+  useEffect(() => {
+    // Load profiles when component mounts
+    const loadedProfiles = listSessionProfiles(sessionId);
+    setProfiles(loadedProfiles);
+  }, []);
+
+  const saveCurrentStateAsProfile = () => {
+    if (!profileName.trim()) {
+      alert("Please enter a profile name");
+      return;
+    }
+
+    const profileData: Omit<PromptGenerationProfile, 'id' | 'createdInSessionId' | 'createdAt'> = {
+      name: profileName.trim(),
+      description: profileDescription.trim() || undefined,
+      lastUsedAt: undefined,
+      pinned: false,
+      tags: [],
+      
+      // Basic mutator toggles
+      useJitter,
+      jitterP,
+      useAutoBind,
+      useEnsure2,
+      useRandNouns,
+      
+      // Advanced randomization controls
+      useMaxRandomization,
+      maxRandomSlots,
+      usePositionBasedRandom,
+      targetPOS,
+      targetPosition,
+      useClickableSelection,
+      selectedPhraseId: selectedPhrase?.id,
+      selectedWordIndices: Array.from(selectedWordIndices),
+      
+      // POS-based randomization
+      posRandomP,
+      
+      // Regex-based randomization
+      regexText,
+      regexRandomizeP,
+      
+      // Source configuration
+      useActivePool,
+      lockedTemplateId: lockedDoc?.id,
+      
+      // RNG seed
+      seed,
+    };
+
+    const newProfile = addSessionProfile(sessionId, profileData);
+    setProfiles(prev => [...prev, newProfile]);
+    setProfileName("");
+    setProfileDescription("");
+    alert(`Profile "${newProfile.name}" saved successfully!`);
+  };
+
+  const loadProfile = (profileId: string) => {
+    const profile = getSessionProfile(sessionId, profileId);
+    if (!profile) {
+      alert("Profile not found");
+      return;
+    }
+
+    // Apply profile settings to current state
+    setUseJitter(profile.useJitter);
+    setJitterP(profile.jitterP);
+    setUseAutoBind(profile.useAutoBind);
+    setUseEnsure2(profile.useEnsure2);
+    setUseRandNouns(profile.useRandNouns);
+    
+    setUseMaxRandomization(profile.useMaxRandomization);
+    setMaxRandomSlots(profile.maxRandomSlots);
+    setUsePositionBasedRandom(profile.usePositionBasedRandom);
+    setTargetPOS(profile.targetPOS);
+    setTargetPosition(profile.targetPosition);
+    setUseClickableSelection(profile.useClickableSelection);
+    
+    // Handle selected phrase - find it in active context
+    if (profile.selectedPhraseId && activeCtx?.phrases) {
+      const phrase = activeCtx.phrases.find((p: any) => p.id === profile.selectedPhraseId);
+      setSelectedPhrase(phrase || null);
+    } else {
+      setSelectedPhrase(null);
+    }
+    setSelectedWordIndices(new Set(profile.selectedWordIndices));
+    
+    setPosRandomP(profile.posRandomP);
+    setRegexText(profile.regexText);
+    setRegexRandomizeP(profile.regexRandomizeP);
+    setUseActivePool(profile.useActivePool);
+    setSeed(profile.seed);
+    
+    // Handle locked template - would need to be reconstructed from ID
+    // For now, just clear it as locked templates are session-specific
+    setLockedDoc(null);
+    
+    setCurrentProfileId(profileId);
+    markProfileAsUsed(sessionId, profileId);
+    alert(`Profile "${profile.name}" loaded successfully!`);
+  };
+
+  const deleteProfile = (profileId: string) => {
+    if (confirm("Are you sure you want to delete this profile?")) {
+      removeSessionProfile(sessionId, profileId);
+      setProfiles(prev => prev.filter(p => p.id !== profileId));
+      if (currentProfileId === profileId) {
+        setCurrentProfileId(null);
+      }
+    }
+  };
+
+  const duplicateProfileHandler = (profileId: string) => {
+    const profile = getSessionProfile(sessionId, profileId);
+    if (!profile) return;
+    
+    const newName = `${profile.name} (Copy)`;
+    const duplicated = duplicateProfile(sessionId, profileId, newName);
+    if (duplicated) {
+      setProfiles(prev => [...prev, duplicated]);
+      alert(`Profile duplicated as "${newName}"`);
+    }
+  };
+
+  const togglePinProfile = (profileId: string) => {
+    const updated = toggleProfilePinned(sessionId, profileId);
+    if (updated) {
+      setProfiles(prev => prev.map(p => p.id === profileId ? updated : p));
+    }
+  };
 
   // --------- On-the-fly configurable mutators ---------
   const configurableMutators: TemplateMutator[] = useMemo(() => {
@@ -547,6 +699,214 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
           <CardTitle className="text-xl">Prompter Dev Panel</CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
+          {/* ---------- Profile Management Section ---------- */}
+          <Card className="border-blue-200 bg-blue-50">
+            <CardHeader>
+              <CardTitle className="text-base flex items-center justify-between">
+                <span>Prompt Generation Profiles</span>
+                <Button 
+                  variant="secondary" 
+                  onClick={() => setShowProfileManager(!showProfileManager)}
+                  className="text-xs"
+                >
+                  {showProfileManager ? "Hide" : "Manage"} Profiles
+                </Button>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Quick Profile Actions */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Save Current Profile */}
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium">Save Current Settings</Label>
+                  <div className="space-y-2">
+                    <Input 
+                      value={profileName} 
+                      onChange={(e) => setProfileName(e.target.value)} 
+                      placeholder="Profile name..."
+                      className="text-sm"
+                    />
+                    <Input 
+                      value={profileDescription} 
+                      onChange={(e) => setProfileDescription(e.target.value)} 
+                      placeholder="Description (optional)..."
+                      className="text-sm"
+                    />
+                    <Button 
+                      onClick={saveCurrentStateAsProfile} 
+                      disabled={!profileName.trim()}
+                      className="w-full text-xs"
+                    >
+                      Save Profile
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Load Profile */}
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium">Load Profile</Label>
+                  <div className="space-y-2">
+                    <select 
+                      value={currentProfileId || ""} 
+                      onChange={(e) => e.target.value && loadProfile(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Select a profile...</option>
+                      {profiles.map(profile => (
+                        <option key={profile.id} value={profile.id}>
+                          {profile.pinned ? "📌 " : ""}{profile.name}
+                        </option>
+                      ))}
+                    </select>
+                    {currentProfileId && (
+                      <div className="text-xs text-green-600">
+                        ✓ Profile loaded
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Quick Actions */}
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium">Quick Actions</Label>
+                  <div className="space-y-1">
+                    <Button 
+                      variant="secondary" 
+                      onClick={() => {
+                        setUseJitter(true);
+                        setJitterP(30);
+                        setUseAutoBind(true);
+                        setUseEnsure2(true);
+                        setUseRandNouns(false);
+                        setUseMaxRandomization(false);
+                        setUsePositionBasedRandom(false);
+                        setUseClickableSelection(false);
+                        setPosRandomP(ALL_POS.reduce((acc, pos) => (acc[pos] = 0, acc), {} as Record<POS, number>));
+                        setRegexText("");
+                        setRegexRandomizeP(0);
+                        setUseActivePool(true);
+                        setSeed("");
+                        setCurrentProfileId(null);
+                        alert("Reset to default settings");
+                      }}
+                      className="w-full text-xs"
+                    >
+                      Reset to Defaults
+                    </Button>
+                    <Button 
+                      variant="secondary" 
+                      onClick={() => {
+                        const pinned = getPinnedProfiles(sessionId);
+                        if (pinned.length === 0) {
+                          alert("No pinned profiles found");
+                          return;
+                        }
+                        // Load the most recently used pinned profile
+                        const mostRecent = pinned.sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0))[0];
+                        loadProfile(mostRecent.id);
+                      }}
+                      className="w-full text-xs"
+                    >
+                      Load Pinned Profile
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Profile Manager (Collapsible) */}
+              {showProfileManager && (
+                <div className="border-t pt-4">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm font-medium">Saved Profiles ({profiles.length})</Label>
+                      <Button 
+                        variant="secondary" 
+                        onClick={() => {
+                          const name = window.prompt("Enter profile name:");
+                          if (name) {
+                            const profile = createDefaultProfile(sessionId, name);
+                            setProfiles(prev => [...prev, profile]);
+                          }
+                        }}
+                        className="text-xs"
+                      >
+                        Create Default Profile
+                      </Button>
+                    </div>
+                    
+                    {profiles.length === 0 ? (
+                      <p className="text-sm text-gray-500 text-center py-4">
+                        No profiles saved yet. Create one above or save your current settings.
+                      </p>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-64 overflow-auto">
+                        {profiles.map(profile => (
+                          <div 
+                            key={profile.id} 
+                            className={`p-3 rounded-lg border ${
+                              currentProfileId === profile.id 
+                                ? 'bg-green-50 border-green-300' 
+                                : 'bg-white border-gray-200'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between mb-2">
+                              <div className="flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium text-sm">{profile.name}</span>
+                                  {profile.pinned && <span className="text-xs">📌</span>}
+                                </div>
+                                {profile.description && (
+                                  <p className="text-xs text-gray-600 mt-1">{profile.description}</p>
+                                )}
+                                <p className="text-xs text-gray-500 mt-1">
+                                  Created: {new Date(profile.createdAt).toLocaleDateString()}
+                                  {profile.lastUsedAt && (
+                                    <span> • Last used: {new Date(profile.lastUsedAt).toLocaleDateString()}</span>
+                                  )}
+                                </p>
+                              </div>
+                            </div>
+                            
+                            <div className="flex gap-1">
+                              <Button 
+                                onClick={() => loadProfile(profile.id)}
+                                className="text-xs px-2 py-1"
+                                variant="primary"
+                              >
+                                Load
+                              </Button>
+                              <Button 
+                                onClick={() => togglePinProfile(profile.id)}
+                                className="text-xs px-2 py-1"
+                                variant="secondary"
+                              >
+                                {profile.pinned ? "Unpin" : "Pin"}
+                              </Button>
+                              <Button 
+                                onClick={() => duplicateProfileHandler(profile.id)}
+                                className="text-xs px-2 py-1"
+                                variant="secondary"
+                              >
+                                Copy
+                              </Button>
+                              <Button 
+                                onClick={() => deleteProfile(profile.id)}
+                                className="text-xs px-2 py-1"
+                                variant="secondary"
+                              >
+                                Delete
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* ---------- Top Three Columns: Generate/Prompt/Debug ---------- */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Generate Controls */}
@@ -725,7 +1085,7 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                     Lock Template
                   </Button>
                   <Button
-                    variant="outline"
+                    variant="secondary"
                     onClick={() => { setLockedDoc(null); alert("Unlocked—using panel source again."); }}
                   >
                     Unlock
@@ -983,7 +1343,7 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                     Lock Pattern
                   </Button>
                   <Button
-                    variant="outline"
+                    variant="secondary"
                     onClick={() => { setLockedDoc(null); alert("Unlocked—using panel source again."); }}
                   >
                     Unlock

@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import type { TemplateDoc, TemplateBlock, TextBlock, PhraseBlock, PhraseToken, MorphFeature, POS, TemplateToken } from '../types';
 import { parseTML, serializeTML } from '../lib/tml';
-import { analyzeFreeText, resolvePhraseTokens, generateFromDocAsync } from '../lib/composer';
+import { analyzeFreeText, resolvePhraseTokens, generateFromDocAsync, convertTemplateDocToUnified } from '../lib/composer';
+import { realizeTemplate } from '../lib/fillTemplate';
+import { wordBank } from '../lib/templates';
+import { parseTemplateTextToTokens } from '../lib/parseTemplateText';
 
 type MorphMenuState = {
   open: boolean;
@@ -34,6 +37,51 @@ const POS_CHIPS: POS[] = [
 ];
 
 // NOTE: Do not "optimize" this back to the legacy behavior.
+// Detect if input is template DSL or free text
+const isTemplateDSL = (text: string): boolean => {
+  // Check for template patterns like [NOUN], [VERB], [CHUNK:[...]], etc.
+  return /\[[A-Za-z0-9:]+(?:-[A-Za-z0-9:]+)*\]/.test(text);
+};
+
+// Convert TemplateDoc to template text string for unified parsing
+export const convertTemplateDocToText = (doc: TemplateDoc): string => {
+  const parts: string[] = [];
+  
+  for (const block of doc.blocks) {
+    if (block.kind === 'text') {
+      const textBlock = block as TextBlock;
+      if (textBlock.text.trim()) {
+        parts.push(textBlock.text);
+      }
+    } else if (block.kind === 'phrase') {
+      const phraseBlock = block as PhraseBlock;
+      const posPattern = phraseBlock.tokens
+        .filter(token => token.randomize && token.pos)
+        .map(token => token.pos)
+        .join('-');
+
+      if (posPattern && phraseBlock.tokens.length > 1) {
+        parts.push(`[CHUNK:[${posPattern}]]`);
+      } else {
+        const templatePattern = phraseBlock.tokens
+          .map(token => {
+            if (token.randomize && token.pos) {
+              const morph = token.morph && token.morph !== 'base' ? `:${token.morph}` : '';
+              const label = token.slotLabel ? `#${token.slotLabel}` : '';
+              return `[${token.pos}${morph}${label}]`;
+            } else {
+              return token.text;
+            }
+          })
+          .join(' ');
+        parts.push(templatePattern);
+      }
+    }
+  }
+  
+  return parts.join(' ');
+};
+
 // This parser must hydrate slot tokens with POS (and optional bind/morph)
 // and must FLATTEN multi-POS patterns (e.g., [NOUN-VERB]) into real tokens.
 export const parseTextPatternsToUTA = async (doc: TemplateDoc, graph: any): Promise<TemplateDoc> => {
@@ -186,6 +234,9 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
   }));
   const [preview, setPreview] = useState<string>('');
   const [morphMenu, setMorphMenu] = useState<MorphMenuState>(null);
+  const [rawTextMode, setRawTextMode] = useState<boolean>(false);
+  const [rawText, setRawText] = useState<string>('');
+  const [isGenerating, setIsGenerating] = useState<boolean>(false);
 
   // Get phrases from context
   const phrases = useMemo(() => {
@@ -210,15 +261,78 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
     return result;
   }, [ctx?.chunks]);
 
-  // ===== Stable preview =====
+  // ===== Generate function for raw text mode =====
+  const generatePreview = async () => {
+    if (!rawText.trim()) {
+      setPreview('');
+      return;
+    }
+
+    setIsGenerating(true);
+    try {
+      // Create a temporary doc with the raw text
+      const tempDoc: TemplateDoc = {
+        id: `temp_${Date.now()}`,
+        blocks: [{ kind: 'text', text: rawText }],
+        createdInSessionId: sessionId
+      };
+
+      // Route to appropriate parser based on input type
+      if (isTemplateDSL(rawText)) {
+        // Template DSL: use parseTemplateTextToTokens
+        const tokens = parseTemplateTextToTokens(rawText);
+        const unifiedTemplate = { tokens };
+        const result = await realizeTemplate({
+          tpl: unifiedTemplate,
+          ctx: { 
+            words: graph?.getNodesByType('WORD') || [], 
+            phrases: graph?.getNodesByType('PHRASE') || [] 
+          },
+          lockedSet: new Set(),
+          wordBank: { ...wordBank, ...(ctx?.words ? {} : {}) }
+        });
+        setPreview(result.surface);
+      } else {
+        // Free text: use analyzeFreeText and generateFromDocAsync
+        const analysis = await analyzeFreeText(rawText, graph);
+        const s = await generateFromDocAsync(analysis, { graph });
+        setPreview(s);
+      }
+    } catch (error) {
+      console.error('Error generating preview:', error);
+      setPreview('Error generating preview');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // ===== Stable preview (only for non-raw-text mode) =====
   useEffect(() => {
+    if (rawTextMode) return; // Don't auto-generate in raw text mode
+    
     (async () => {
-      // Parse text patterns into UTA format
+      // Use original parseTextPatternsToUTA pipeline for TemplateDoc
       const parsedDoc = await parseTextPatternsToUTA(doc, graph);
-      const s = await generateFromDocAsync(parsedDoc, { graph });
-      setPreview(s);
+      const unifiedTemplate = convertTemplateDocToUnified(parsedDoc);
+      const result = await realizeTemplate({
+        tpl: unifiedTemplate,
+        ctx: { 
+          words: graph?.getNodesByType('WORD') || [], 
+          phrases: graph?.getNodesByType('PHRASE') || [] 
+        },
+        lockedSet: new Set(),
+        wordBank: { ...wordBank, ...(ctx?.words ? {} : {}) }
+      });
+      setPreview(result.surface);
     })();
-  }, [doc, graph]);
+  }, [doc, graph, rawTextMode]);
+
+  // Update text editor when doc changes (but not in raw text mode)
+  useEffect(() => {
+    if (!rawTextMode) {
+      updateTextEditorFromDoc(doc);
+    }
+  }, [doc, rawTextMode]);
 
 
   // === Token interactions (stable)
@@ -238,8 +352,59 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
       } else {
         tok.randomize = !tok.randomize;
       }
+      
+      // Update the text editor to reflect changes
+      updateTextEditorFromDoc(copy);
+      
       return copy;
     });
+  };
+
+  // Update text editor to show current template syntax
+  const updateTextEditorFromDoc = (doc: TemplateDoc) => {
+    const templateParts: string[] = [];
+    
+    for (const block of doc.blocks) {
+      if (block.kind === 'text') {
+        const textBlock = block as TextBlock;
+        if (textBlock.text.trim()) {
+          templateParts.push(textBlock.text);
+        }
+      } else if (block.kind === 'phrase') {
+        const phraseBlock = block as PhraseBlock;
+        
+        // Check if this is a chunk (has posPattern that looks like ADJ-NOUN-NOUN)
+        const posPattern = phraseBlock.tokens
+          .filter(token => token.randomize && token.pos)
+          .map(token => token.pos)
+          .join('-');
+        
+        if (posPattern && phraseBlock.tokens.length > 1) {
+          // This is a chunk - show as [CHUNK:[POS-POS-POS]]
+          templateParts.push(`[CHUNK:[${posPattern}]]`);
+        } else {
+          // This is a regular phrase - convert to template syntax
+          const templatePattern = phraseBlock.tokens
+            .map(token => {
+              if (token.randomize && token.pos) {
+                const morph = token.morph && token.morph !== 'base' ? `:${token.morph}` : '';
+                const label = token.slotLabel ? `#${token.slotLabel}` : '';
+                return `[${token.pos}${morph}${label}]`;
+              } else {
+                return token.text;
+              }
+            })
+            .join(' ');
+          templateParts.push(templatePattern);
+        }
+      }
+    }
+    
+    const templateText = templateParts.join(' ');
+    // Update the raw text if we're in raw text mode
+    if (rawTextMode) {
+      setRawText(templateText);
+    }
   };
 
   const onTokenContextMenu = (bi: number, ti: number, e: React.MouseEvent) => {
@@ -299,10 +464,15 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
   // Append a phrase from tray (stable: add after current content)
   const addTrayPhrase = async (p: string) => {
     const tokens = await resolvePhraseTokens(p, graph);
-    setDoc(d => ({
-      ...d,
-      blocks: [...d.blocks, { kind: 'phrase', phraseText: p, tokens } as PhraseBlock],
-    }));
+    setDoc(d => {
+      const newDoc = {
+        ...d,
+        blocks: [...d.blocks, { kind: 'phrase', phraseText: p, tokens } as PhraseBlock],
+      };
+      // Update the text editor to reflect changes
+      updateTextEditorFromDoc(newDoc);
+      return newDoc;
+    });
   };
 
   // Add a POS slot to the current text block
@@ -324,6 +494,9 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
         textBlock.analysis = analysis;
       });
       
+      // Update the text editor to reflect changes
+      updateTextEditorFromDoc(copy);
+      
       return copy;
     });
   };
@@ -333,10 +506,22 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
     // Use the chunk's actual text content, not just the POS pattern
     const chunkText = chunk.text || `[${chunk.posPattern}]`;
     const tokens = await resolvePhraseTokens(chunkText, graph);
-    setDoc(d => ({
-      ...d,
-      blocks: [...d.blocks, { kind: 'phrase', phraseText: chunkText, tokens } as PhraseBlock],
+    
+    // Mark all tokens as randomize to ensure they're treated as slots
+    const chunkTokens = tokens.map(token => ({
+      ...token,
+      randomize: true
     }));
+    
+    setDoc(d => {
+      const newDoc = {
+        ...d,
+        blocks: [...d.blocks, { kind: 'phrase', phraseText: chunkText, tokens: chunkTokens } as PhraseBlock],
+      };
+      // Update the text editor to reflect changes
+      updateTextEditorFromDoc(newDoc);
+      return newDoc;
+    });
   };
 
 
@@ -383,16 +568,39 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
             )}
           </div>
         </div>
-        {/* Inline composer (read-only visual) */}
+        {/* Inline composer (always shows preview) */}
         <div className="flex-1">
           <div className="mb-2 text-sm font-semibold">Inline Composer</div>
           <div className="min-h-[96px] rounded border bg-white p-3 leading-7">
-            {doc.blocks.map((b, bi) =>
-              b.kind === 'text' ? (
-                <span key={`t-${bi}`} className="whitespace-pre-wrap">{(b as TextBlock).text}</span>
-              ) : (
-                <span key={`p-${bi}`} className="inline-block align-middle mx-1">{renderPhraseChip(b as PhraseBlock, bi)}</span>
-              )
+            {rawTextMode ? (
+              // In raw text mode, show the preview from generation
+              <div className="text-gray-700">
+                {preview || 'Enter template pattern and click Generate Preview'}
+              </div>
+            ) : (
+              // In interactive mode, show phrase chips for all blocks
+              doc.blocks.map((b, bi) => {
+                if (b.kind === 'text') {
+                  const textBlock = b as TextBlock;
+                  // Parse text blocks to show as phrase chips
+                  if (textBlock.text.trim()) {
+                    return (
+                      <span key={`t-${bi}`} className="inline-block align-middle mx-1">
+                        <span className="inline-flex items-center gap-1 rounded-2xl bg-blue-100 px-2 py-1 shadow-sm border border-blue-200">
+                          <span className="text-blue-800 font-medium">{textBlock.text}</span>
+                        </span>
+                      </span>
+                    );
+                  }
+                  return null;
+                } else {
+                  return (
+                    <span key={`p-${bi}`} className="inline-block align-middle mx-1">
+                      {renderPhraseChip(b as PhraseBlock, bi)}
+                    </span>
+                  );
+                }
+              })
             )}
           </div>
           {/* POS Chips */}
@@ -413,69 +621,118 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
 
           {/* Controls */}
           <div className="mt-3 flex flex-col gap-3">
+            {/* Mode Toggle */}
+            <div className="flex items-center gap-2">
+              <button
+                className={`px-3 py-1 rounded text-sm font-medium ${
+                  !rawTextMode 
+                    ? 'bg-blue-600 text-white' 
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+                onClick={() => setRawTextMode(false)}
+              >
+                Interactive Mode
+              </button>
+              <button
+                className={`px-3 py-1 rounded text-sm font-medium ${
+                  rawTextMode 
+                    ? 'bg-blue-600 text-white' 
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+                onClick={() => setRawTextMode(true)}
+              >
+                Raw Text Mode
+              </button>
+            </div>
+
+            {/* Text Input */}
             <div>
-              <div className="mb-1 text-sm font-medium">Text</div>
-              <textarea
-                className="w-full min-h-[72px] rounded border bg-white p-2"
-                placeholder="Type literal text here…"
-                value={(() => {
-                  // Build complete template in raw text form
-                  const templateParts: string[] = [];
-                  
-                  for (const block of doc.blocks) {
-                    if (block.kind === 'text') {
-                      // Text blocks - check if they contain patterns
-                      const textBlock = block as TextBlock;
-                      const text = textBlock.text;
-                      
-                      // Check if text contains patterns like [NOUN]
-                      const patternRegex = /\[([A-Z]+(?:-[A-Z]+)*)\]/g;
-                      if (patternRegex.test(text)) {
-                        // Text contains patterns, add as-is
-                        templateParts.push(text);
-                      } else {
-                        // Plain text, add as-is
-                        templateParts.push(text);
+              <div className="mb-1 text-sm font-medium">
+                {rawTextMode ? 'Raw Template Text' : 'Text'}
+              </div>
+              {rawTextMode ? (
+                <div className="space-y-2">
+                  <textarea
+                    className="w-full min-h-[72px] rounded border bg-white p-2 font-mono text-sm"
+                    placeholder="Type template pattern here, e.g., [NOUN] [VERB] [CHUNK:[DET-ADJ-NOUN]] [ADV]"
+                    value={rawText}
+                    onChange={(e) => setRawText(e.target.value)}
+                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                      onClick={generatePreview}
+                      disabled={isGenerating || !rawText.trim()}
+                    >
+                      {isGenerating ? 'Generating...' : 'Generate Preview'}
+                    </button>
+                    <button
+                      className="px-3 py-2 bg-gray-200 text-gray-700 rounded text-sm font-medium hover:bg-gray-300"
+                      onClick={() => {
+                        setRawText('');
+                        setPreview('');
+                      }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="text-xs text-gray-600 space-y-1">
+                    <div><strong>Supported patterns:</strong></div>
+                    <div>• Basic slots: <code className="bg-gray-100 px-1 rounded">[NOUN] [VERB] [ADJ]</code></div>
+                    <div>• Nested chunks: <code className="bg-gray-100 px-1 rounded">[CHUNK:[DET-ADJ-NOUN]]</code></div>
+                    <div>• Morphology: <code className="bg-gray-100 px-1 rounded">[VERB:past] [ADJ:comparative]</code></div>
+                    <div>• Mixed: <code className="bg-gray-100 px-1 rounded">[NOUN] [VERB] [CHUNK:[DET-ADJ-NOUN]] [ADV]</code></div>
+                  </div>
+                </div>
+              ) : (
+                <textarea
+                  className="w-full min-h-[72px] rounded border bg-white p-2 font-mono text-sm"
+                  placeholder="Template will appear here as you build it..."
+                  value={(() => {
+                    // Build template syntax from doc blocks (same logic as updateTextEditorFromDoc)
+                    const templateParts: string[] = [];
+                    
+                    for (const block of doc.blocks) {
+                      if (block.kind === 'text') {
+                        const textBlock = block as TextBlock;
+                        if (textBlock.text.trim()) {
+                          templateParts.push(textBlock.text);
+                        }
+                      } else if (block.kind === 'phrase') {
+                        const phraseBlock = block as PhraseBlock;
+                        
+                        // Check if this is a chunk (has posPattern that looks like ADJ-NOUN-NOUN)
+                        const posPattern = phraseBlock.tokens
+                          .filter(token => token.randomize && token.pos)
+                          .map(token => token.pos)
+                          .join('-');
+                        
+                        if (posPattern && phraseBlock.tokens.length > 1) {
+                          // This is a chunk - show as [CHUNK:[POS-POS-POS]]
+                          templateParts.push(`[CHUNK:[${posPattern}]]`);
+                        } else {
+                          // This is a regular phrase - convert to template syntax
+                          const templatePattern = phraseBlock.tokens
+                            .map(token => {
+                              if (token.randomize && token.pos) {
+                                const morph = token.morph && token.morph !== 'base' ? `:${token.morph}` : '';
+                                const label = token.slotLabel ? `#${token.slotLabel}` : '';
+                                return `[${token.pos}${morph}${label}]`;
+                              } else {
+                                return token.text;
+                              }
+                            })
+                            .join(' ');
+                          templateParts.push(templatePattern);
+                        }
                       }
-                    } else if (block.kind === 'phrase') {
-                      // Phrase blocks - reconstruct the raw template pattern
-                      const phraseBlock = block as PhraseBlock;
-                      const templatePattern = phraseBlock.tokens
-                        .map(token => {
-                          if (token.randomize && token.pos) {
-                            // This is a slot - show as {word^morph#label}
-                            const morph = token.morph && token.morph !== 'base' ? `^${token.morph}` : '';
-                            const label = token.slotLabel ? `#${token.slotLabel}` : '';
-                            return `{${token.text}${morph}${label}}`;
-                          } else {
-                            // This is literal text
-                            return token.text;
-                          }
-                        })
-                        .join(' ');
-                      templateParts.push(templatePattern);
                     }
-                  }
-                  
-                  // Join all parts and wrap in brackets if there are multiple blocks or patterns
-                  const result = templateParts.join(' ');
-                  return result;
-                })()}
-                onChange={async (e) => {
-                  const text = e.target.value;
-                  const analysis = await analyzeFreeText(text, graph);
-                  setDoc(d => {
-                    const copy = structuredClone(d);
-                    if (!copy.blocks.length || copy.blocks[0].kind !== 'text') {
-                      copy.blocks.unshift({ kind: 'text', text, analysis } as TextBlock);
-                    } else {
-                      (copy.blocks[0] as TextBlock).text = text;
-                      (copy.blocks[0] as TextBlock).analysis = analysis;
-                    }
-                    return copy;
-                  });
-                }}
-              />
+                    
+                    return templateParts.join(' ');
+                  })()}
+                  readOnly
+                />
+              )}
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -521,8 +778,17 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
             </div>
             {/* Preview */}
             <div>
-              <div className="text-sm font-semibold mb-1">Preview</div>
-              <div className="whitespace-pre-wrap rounded border bg-white p-3">{preview}</div>
+              <div className="text-sm font-semibold mb-1">
+                Preview
+                {rawTextMode && (
+                  <span className="text-xs text-gray-500 ml-2">
+                    (Raw Text Mode - Click Generate to update)
+                  </span>
+                )}
+              </div>
+              <div className="whitespace-pre-wrap rounded border bg-white p-3 min-h-[60px]">
+                {preview || (rawTextMode ? 'Enter template pattern and click Generate Preview' : 'No preview available')}
+              </div>
             </div>
           </div>
         </div>

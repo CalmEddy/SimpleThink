@@ -63,7 +63,7 @@ export const wordBank: Record<POS, string[]> = {
   DET: ['fb_a','fb_an','fb_the','fb_this','fb_that','fb_these','fb_those','fb_my','fb_your','fb_his','fb_her','fb_its','fb_our','fb_their'],
   PRON: ['fb_I','fb_you','fb_he','fb_she','fb_it','fb_we','fb_they','fb_me','fb_him','fb_her','fb_us','fb_them'],
   PROPN: ['fb_Alice','fb_Paris','fb_Google','fb_Saturday','fb_Indiana','fb_Jesus','fb_Cleveland'],
-  AUX: ['fb_is','fb_are','fb_was','fb_were','fb_be','fb_been','fb_being','fb_have','fb_has','fb_had','fb_do','fb_does','fb_did','fb_will','fb_would','fb_can','fb_could','fb_should'],
+  AUX: ['fb_am','fb_are','fb_be','fb_been','fb_being','fb_can','fb_could','fb_did','fb_do','fb_does','fb_done','fb_had','fb_has','fb_have','fb_having','fb_is','fb_may','fb_might','fb_must','fb_should','fb_was','fb_were','fb_will','fb_would'],
   CCONJ: ['fb_and','fb_but','fb_or','fb_nor','fb_for','fb_yet','fb_so'],
 };
 
