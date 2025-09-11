@@ -1,7 +1,7 @@
 import { useMemo, useState, useEffect, useRef } from 'react';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext';
 import { SlotDescriptor, POS } from '../types/index.js';
-import { addSessionTemplate, updateSessionTemplate, removeSessionTemplate, listSessionTemplates } from '../lib/sessionTemplates.js';
+import { addSessionTemplate, updateSessionTemplate, removeSessionTemplate, listSessionTemplates, saveAllTemplates, loadTemplatesFromFile } from '../lib/userTemplates.js';
 import { createTemplateFromText } from '../lib/promptEngine.js';
 import { realizeTemplate } from '../lib/fillTemplate.js';
 import type { SemanticGraphLite } from '../lib/semanticGraphLite.js';
@@ -498,6 +498,59 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
             </div>
           ))}
           {!sessionTemplates.length && <div className="text-sm text-muted-foreground">No session templates yet.</div>}
+        </div>
+      </div>
+
+      {/* File Operations Section */}
+      <div className="card p-6 rounded-lg shadow-lg">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-gray-800">File Operations</h3>
+          <div className="text-sm text-gray-600">Save/Load Templates</div>
+        </div>
+        
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            className="btn-primary px-4 py-2 rounded text-sm flex items-center justify-center gap-2"
+            onClick={async () => {
+              try {
+                await saveAllTemplates();
+                alert('All templates saved to file successfully!');
+              } catch (error) {
+                console.error('Failed to save templates:', error);
+                alert('Failed to save templates to file. Check console for details.');
+              }
+            }}
+          >
+            💾 Save
+          </button>
+          
+          <button
+            className="btn-secondary px-4 py-2 rounded text-sm flex items-center justify-center gap-2"
+            onClick={async () => {
+              try {
+                await loadTemplatesFromFile();
+                alert('Templates loaded from file successfully!');
+                // Templates are automatically refreshed from the session
+              } catch (error) {
+                console.error('Failed to load templates:', error);
+                alert('Failed to load templates from file. Check console for details.');
+              }
+            }}
+          >
+            📂 Load
+          </button>
+        </div>
+        
+        <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+          <div className="text-sm text-blue-800">
+            <strong>File Operations Help:</strong>
+          </div>
+          <div className="text-xs text-blue-700 mt-1 space-y-1">
+            <div>• <strong>Save:</strong> Save all templates from all sessions to a local file</div>
+            <div>• <strong>Load:</strong> Load templates from a file and merge them with existing templates</div>
+            <div>• Templates are automatically saved to browser storage for persistence</div>
+            <div>• Loading templates will not reset your app - they are merged safely</div>
+          </div>
         </div>
       </div>
         </>

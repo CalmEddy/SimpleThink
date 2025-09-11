@@ -8,6 +8,7 @@ import PrompterDevPanel from './components/PrompterDevPanel.tsx';
 import { ActiveNodesProvider } from './contexts/ActiveNodesContext.jsx';
 import { getAvailableTemplates } from './lib/promptEngine.js';
 import { useActiveNodesWithGraph } from './contexts/ActiveNodesContext.js';
+import { loadAllTemplatesFromStorage } from './lib/userTemplates.js';
 import type { TemplateDoc } from './types/index.js';
 
 type ViewType = 'ingest' | 'explore' | 'prompt' | 'dev';
@@ -67,6 +68,9 @@ function App() {
 
       // Initialize persistence
       await persistenceManager.initialize();
+
+      // Load all user templates from localStorage
+      loadAllTemplatesFromStorage();
 
       // Load existing graph
       const savedGraph = await persistenceManager.loadGraph();

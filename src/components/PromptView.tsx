@@ -3,6 +3,7 @@ import { SemanticGraphLite } from '../lib/semanticGraphLite.js';
 import { recordResponse, promoteResponseToPhrase, rateResponse } from '../lib/respond.js';
 import { generateEphemeralPrompts } from '../lib/promptEngineBridge.js';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext.js';
+import { listSessionTemplates, removeSessionTemplate } from '../lib/userTemplates.js';
 import type { PromptNode, ResponseNode, EphemeralPrompt } from '../types/index.js';
 
 interface PromptViewProps {
@@ -22,9 +23,20 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
   const [ephemeralPrompts, setEphemeralPrompts] = useState<EphemeralPrompt[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationCount, setGenerationCount] = useState(10);
+  const [userTemplates, setUserTemplates] = useState<any[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<any | null>(null);
+  const [templateMixRatio, setTemplateMixRatio] = useState(0.5); // 0 = all generated, 1 = all user templates
 
   const prompts = graph.getNodesByType('PROMPT') as PromptNode[];
   const responses = graph.getNodesByType('RESPONSE') as ResponseNode[];
+
+  // Load user templates when component mounts
+  useEffect(() => {
+    if (contextFrame?.sessionId) {
+      const templates = listSessionTemplates(contextFrame.sessionId);
+      setUserTemplates(templates);
+    }
+  }, [contextFrame?.sessionId]);
 
   // Generate new prompts when component mounts or context changes
   useEffect(() => {
@@ -44,10 +56,18 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
         graph,
         ctx,
         contextFrame.sessionId,
-        generationCount
+        generationCount,
+        undefined, // seed
+        templateMixRatio // template mix ratio
       );
 
       setEphemeralPrompts(newPrompts);
+      
+      // Refresh templates list to ensure it's up to date
+      if (contextFrame?.sessionId) {
+        const templates = listSessionTemplates(contextFrame.sessionId);
+        setUserTemplates(templates);
+      }
     } catch (error) {
       onError(error instanceof Error ? error.message : 'Failed to generate prompts');
     } finally {
@@ -67,6 +87,36 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
     setSelectedPrompt(null);
     setResponseText('');
     setLastResponse(null);
+  };
+
+  const handleTemplateSelect = (template: any) => {
+    setSelectedTemplate(template);
+  };
+
+  const handleDeleteTemplate = async (templateId: string) => {
+    if (!confirm('Are you sure you want to delete this template?')) {
+      return;
+    }
+
+    try {
+      await removeSessionTemplate(contextFrame?.sessionId || '', templateId);
+      
+      // Refresh templates list
+      if (contextFrame?.sessionId) {
+        const templates = listSessionTemplates(contextFrame.sessionId);
+        setUserTemplates(templates);
+      }
+      
+      // Clear selection if deleted template was selected
+      if (selectedTemplate?.id === templateId) {
+        setSelectedTemplate(null);
+      }
+      
+      // Refresh prompts to reflect template changes
+      generateNewPrompts();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : 'Failed to delete template');
+    }
   };
 
   const handleSubmitResponse = async () => {
@@ -182,6 +232,84 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left Column - Prompts */}
         <div className="space-y-6">
+          {/* Template Mix Control */}
+          <div className="card p-6 rounded-lg shadow-lg">
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">Template Mix</h3>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-gray-700">
+                  User Templates vs Generated Templates
+                </label>
+                <span className="text-sm text-gray-500">
+                  {Math.round(templateMixRatio * 100)}% User
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                value={templateMixRatio}
+                onChange={(e) => setTemplateMixRatio(parseFloat(e.target.value))}
+                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
+                style={{
+                  background: `linear-gradient(to right, #3b82f6 0%, #3b82f6 ${templateMixRatio * 100}%, #e5e7eb ${templateMixRatio * 100}%, #e5e7eb 100%)`
+                }}
+              />
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>All Generated</span>
+                <span>All User Templates</span>
+              </div>
+            </div>
+          </div>
+
+          {/* User Templates */}
+          <div className="card p-6 rounded-lg shadow-lg">
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">
+              User Templates ({userTemplates.length})
+            </h3>
+            <div className="space-y-3 max-h-64 overflow-y-auto">
+              {userTemplates.map((template) => (
+                <div
+                  key={template.id}
+                  className={`template-item p-3 rounded-lg cursor-pointer transition-all ${
+                    selectedTemplate?.id === template.id ? 'ring-2 ring-blue-500 bg-blue-50' : 'hover:bg-gray-50'
+                  }`}
+                  onClick={() => handleTemplateSelect(template)}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="font-medium text-gray-800 text-sm">{template.text}</div>
+                      {template.tags && template.tags.length > 0 && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          Tags: {template.tags.join(', ')}
+                        </div>
+                      )}
+                      {template.pinned && (
+                        <div className="text-xs text-blue-600 mt-1">📌 Pinned</div>
+                      )}
+                    </div>
+                    <button
+                      className="ml-2 text-red-500 hover:text-red-700 p-1"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteTemplate(template.id);
+                      }}
+                      title="Delete template"
+                    >
+                      🗑️
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {userTemplates.length === 0 && (
+                <div className="text-center text-gray-500 py-8">
+                  No user templates. Create some in the Composer or Template Editor.
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* Generated Ephemeral Prompts */}
           <div className="card p-6 rounded-lg shadow-lg">
             <h3 className="text-xl font-semibold text-gray-800 mb-4">

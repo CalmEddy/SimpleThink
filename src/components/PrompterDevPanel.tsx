@@ -9,14 +9,17 @@ import { promptEngine } from "../lib/promptEngine.js";
 import { 
   listSessionProfiles, 
   addSessionProfile, 
+  updateSessionProfile,
   removeSessionProfile, 
   getSessionProfile,
   createDefaultProfile,
   duplicateProfile,
   markProfileAsUsed,
   getPinnedProfiles,
-  toggleProfilePinned
+  toggleProfilePinned,
+  ensureDefaultProfileExists
 } from "../lib/sessionProfiles.js";
+import { getSessionLocks, setSessionLocks } from "../lib/sessionLocks.js";
 // NOTE: We intentionally avoid resolvePhraseTokens to prevent runtime errors.
 
 /**
@@ -175,7 +178,7 @@ const Badge: React.FC<{
 
 export default function PrompterDevPanel({ source, graph, bank, className }: PrompterDevPanelProps) {
   // 🔗 Hook into the ACTIVE NODE POOL (same context Composer uses)
-  const { ctx: activeCtx } = useActiveNodesWithGraph(graph as any);
+  const { ctx: activeCtx, contextFrame } = useActiveNodesWithGraph(graph as any);
   
   // Profile management state
   const [profiles, setProfiles] = useState<PromptGenerationProfile[]>([]);
@@ -188,11 +191,11 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
   const [seed, setSeed] = useState<string>("");
   const rng = useMemo(() => (seed ? { next: seedrandom(seed) } : undefined), [seed]);
 
-  // Built-in mutator toggles
-  const [useJitter, setUseJitter] = useState<boolean>(true);
+  // Built-in mutator toggles - initialized from default profile
+  const [useJitter, setUseJitter] = useState<boolean>(false);
   const [jitterP, setJitterP] = useState<number>(30);
-  const [useAutoBind, setUseAutoBind] = useState<boolean>(true);
-  const [useEnsure2, setUseEnsure2] = useState<boolean>(true);
+  const [useAutoBind, setUseAutoBind] = useState<boolean>(false);
+  const [useEnsure2, setUseEnsure2] = useState<boolean>(false);
   const [useRandNouns, setUseRandNouns] = useState<boolean>(false);
 
   // Advanced slot randomization controls
@@ -214,8 +217,8 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
   const [regexText, setRegexText] = useState<string>("");
   const [regexRandomizeP, setRegexRandomizeP] = useState<number>(0);
 
-  // Template locking
-  const [lockedDoc, setLockedDoc] = useState<TemplateDoc | null>(null);
+  // Template locking - use session locks system
+  const [lockedTemplateId, setLockedTemplateId] = useState<string | null>(null);
   const [phraseInput, setPhraseInput] = useState<string>("");
   const [patternInput, setPatternInput] = useState<string>("");
   const [useActivePool, setUseActivePool] = useState<boolean>(true); // default ON to mirror Composer
@@ -303,14 +306,54 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
     setProfiles(loadedProfiles);
   }, []);
 
+  // Load initial state from default profile
+  useEffect(() => {
+    if (sessionId) {
+      try {
+        const defaultProfile = ensureDefaultProfileExists(sessionId);
+        
+        // Load mutator settings from default profile
+        setUseJitter(defaultProfile.useJitter);
+        setJitterP(defaultProfile.jitterP);
+        setUseAutoBind(defaultProfile.useAutoBind);
+        setUseEnsure2(defaultProfile.useEnsure2);
+        setUseRandNouns(defaultProfile.useRandNouns);
+        setUseMaxRandomization(defaultProfile.useMaxRandomization);
+        setMaxRandomSlots(defaultProfile.maxRandomSlots);
+        setUsePositionBasedRandom(defaultProfile.usePositionBasedRandom);
+        setTargetPOS(defaultProfile.targetPOS);
+        setTargetPosition(defaultProfile.targetPosition);
+        setUseClickableSelection(defaultProfile.useClickableSelection);
+        setSelectedPhrase(defaultProfile.selectedPhraseId ? { id: defaultProfile.selectedPhraseId } : null);
+        setSelectedWordIndices(new Set(defaultProfile.selectedWordIndices));
+        setPosRandomP({ ...defaultProfile.posRandomP });
+        setRegexText(defaultProfile.regexText);
+        setRegexRandomizeP(defaultProfile.regexRandomizeP);
+        setUseActivePool(defaultProfile.useActivePool);
+        setSeed(defaultProfile.seed);
+      } catch (error) {
+        console.warn('Failed to load default profile, using fallback settings:', error);
+      }
+    }
+  }, [sessionId]);
+
   const saveCurrentStateAsProfile = () => {
     if (!profileName.trim()) {
       alert("Please enter a profile name");
       return;
     }
 
+    const trimmedName = profileName.trim();
+    
+    // Check for duplicate names (only if not editing the same profile)
+    const existingProfile = profiles.find(p => p.name.toLowerCase() === trimmedName.toLowerCase());
+    if (existingProfile && existingProfile.id !== currentProfileId) {
+      alert(`A profile with the name "${trimmedName}" already exists. Please choose a different name.`);
+      return;
+    }
+
     const profileData: Omit<PromptGenerationProfile, 'id' | 'createdInSessionId' | 'createdAt'> = {
-      name: profileName.trim(),
+      name: trimmedName,
       description: profileDescription.trim() || undefined,
       lastUsedAt: undefined,
       pinned: false,
@@ -342,17 +385,31 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
       
       // Source configuration
       useActivePool,
-      lockedTemplateId: lockedDoc?.id,
+      lockedTemplateId: lockedTemplateId,
       
       // RNG seed
       seed,
     };
 
-    const newProfile = addSessionProfile(sessionId, profileData);
-    setProfiles(prev => [...prev, newProfile]);
+    if (currentProfileId && existingProfile) {
+      // Update existing profile
+      const updatedProfile = updateSessionProfile(sessionId, currentProfileId, profileData);
+      if (updatedProfile) {
+        setProfiles(prev => prev.map(p => p.id === currentProfileId ? updatedProfile : p));
+        alert(`Profile "${updatedProfile.name}" updated successfully!`);
+      } else {
+        alert("Failed to update profile");
+        return;
+      }
+    } else {
+      // Create new profile
+      const newProfile = addSessionProfile(sessionId, profileData);
+      setProfiles(prev => [...prev, newProfile]);
+      alert(`Profile "${newProfile.name}" saved successfully!`);
+    }
+    
     setProfileName("");
     setProfileDescription("");
-    alert(`Profile "${newProfile.name}" saved successfully!`);
   };
 
   const loadProfile = (profileId: string) => {
@@ -391,9 +448,12 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
     setUseActivePool(profile.useActivePool);
     setSeed(profile.seed);
     
-    // Handle locked template - would need to be reconstructed from ID
-    // For now, just clear it as locked templates are session-specific
-    setLockedDoc(null);
+    // Handle locked template - restore from profile
+    setLockedTemplateId(profile.lockedTemplateId || null);
+    
+    // Populate profile name and description for editing
+    setProfileName(profile.name);
+    setProfileDescription(profile.description || "");
     
     setCurrentProfileId(profileId);
     markProfileAsUsed(sessionId, profileId);
@@ -414,7 +474,15 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
     const profile = getSessionProfile(sessionId, profileId);
     if (!profile) return;
     
-    const newName = `${profile.name} (Copy)`;
+    // Generate a unique name by appending a number if needed
+    let newName = `${profile.name} (Copy)`;
+    let counter = 1;
+    
+    while (profiles.some(p => p.name.toLowerCase() === newName.toLowerCase())) {
+      newName = `${profile.name} (Copy ${counter})`;
+      counter++;
+    }
+    
     const duplicated = duplicateProfile(sessionId, profileId, newName);
     if (duplicated) {
       setProfiles(prev => [...prev, duplicated]);
@@ -604,27 +672,6 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
     return { ok:true, normalized:`[${serialized}]` };
   }
 
-  // Build TemplateDoc[] from the ACTIVE POOL (phrases + chunks) — using node fields only
-  const activeSource: TemplateSource = useMemo(() => {
-    return async () => {
-      // If a template is locked, respect that.
-      if (lockedDoc) return [lockedDoc];
-      const out: TemplateDoc[] = [];
-
-      // 1) Phrase-derived docs — build from node text + posPattern
-      for (const ph of (activeCtx?.phrases ?? [])) {
-        const doc = buildDocFromPhraseNode(ph);
-        out.push(doc);
-      }
-
-      // 2) Chunk-derived docs — build from node text + posPattern
-      for (const ch of (activeCtx?.chunks ?? [])) {
-        const doc = buildDocFromChunkNode(ch);
-        out.push(doc);
-      }
-      return out;
-    };
-  }, [activeCtx, graph, lockedDoc]);
 
   // --------- Generate handler ---------
   const handleGenerate = async () => {
@@ -642,13 +689,34 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
         }
       }
 
+      // Update PromptEngine with current dev panel settings
+      promptEngine.updateMutatorConfig({
+        useJitter,
+        jitterP,
+        useAutoBind,
+        useEnsure2,
+        useRandNouns,
+        useMaxRandomization,
+        maxRandomSlots,
+        usePositionBasedRandom,
+        targetPOS,
+        targetPosition,
+        useClickableSelection,
+        selectedPhrase,
+        selectedWordIndices,
+        posRandomP,
+        regexText,
+        regexRandomizeP,
+      });
+
       // Use the enhanced PromptEngine instead of creating a new Prompter instance
       const res = await promptEngine.generateEnhancedPrompt(
         activeCtx || { words: [], chunks: [], phrases: [] },
         graph,
         sessionId,
         rng,
-        useActivePool ? undefined : (lockedDoc || undefined)
+        undefined, // lockedDoc
+        lockedTemplateId // lockedTemplateId
       );
       
       setPrompt(res.prompt);
@@ -676,14 +744,32 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
 
   // --------- Lock from phrase/chunk row click ---------
   async function lockFromPhraseNodeClick(ph: any) {
-    const doc = buildDocFromPhraseNode(ph);
-    setLockedDoc(doc);
+    if (!graph || !contextFrame?.sessionId) return;
+    
+    // Use the phrase ID as the template ID for locking
+    const templateId = ph.id;
+    setLockedTemplateId(templateId);
+    
+    // Update session locks
+    const locks = getSessionLocks(graph, contextFrame.sessionId);
+    const updatedLocks = { ...locks, lockedTemplateIds: [templateId] };
+    setSessionLocks(graph, contextFrame.sessionId, updatedLocks);
+    
     alert("Locked to this template.");
   }
 
   async function lockFromChunkNodeClick(ch: any) {
-    const doc = buildDocFromChunkNode(ch);
-    setLockedDoc(doc);
+    if (!graph || !contextFrame?.sessionId) return;
+    
+    // Use the chunk ID as the template ID for locking
+    const templateId = ch.id;
+    setLockedTemplateId(templateId);
+    
+    // Update session locks
+    const locks = getSessionLocks(graph, contextFrame.sessionId);
+    const updatedLocks = { ...locks, lockedTemplateIds: [templateId] };
+    setSessionLocks(graph, contextFrame.sessionId, updatedLocks);
+    
     alert("Locked to this template.");
   }
 
@@ -727,13 +813,28 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                       placeholder="Description (optional)..."
                       className="text-sm"
                     />
-                    <Button 
-                      onClick={saveCurrentStateAsProfile} 
-                      disabled={!profileName.trim()}
-                      className="w-full text-xs"
-                    >
-                      Save Profile
-                    </Button>
+                    <div className="flex gap-2">
+                      <Button 
+                        onClick={saveCurrentStateAsProfile} 
+                        disabled={!profileName.trim()}
+                        className="flex-1 text-xs"
+                      >
+                        {currentProfileId ? "Update Profile" : "Save Profile"}
+                      </Button>
+                      {currentProfileId && (
+                        <Button 
+                          onClick={() => {
+                            setCurrentProfileId(null);
+                            setProfileName("");
+                            setProfileDescription("");
+                          }}
+                          variant="secondary"
+                          className="text-xs"
+                        >
+                          Clear
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 </div>
 
@@ -819,8 +920,22 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                         onClick={() => {
                           const name = window.prompt("Enter profile name:");
                           if (name) {
-                            const profile = createDefaultProfile(sessionId, name);
+                            const trimmedName = name.trim();
+                            if (!trimmedName) {
+                              alert("Please enter a valid profile name");
+                              return;
+                            }
+                            
+                            // Check for duplicate names
+                            const existingProfile = profiles.find(p => p.name.toLowerCase() === trimmedName.toLowerCase());
+                            if (existingProfile) {
+                              alert(`A profile with the name "${trimmedName}" already exists. Please choose a different name.`);
+                              return;
+                            }
+                            
+                            const profile = createDefaultProfile(sessionId, trimmedName);
                             setProfiles(prev => [...prev, profile]);
+                            alert(`Profile "${trimmedName}" created successfully!`);
                           }
                         }}
                         className="text-xs"
@@ -1081,7 +1196,15 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                   </Button>
                   <Button
                     variant="secondary"
-                    onClick={() => { setLockedDoc(null); alert("Unlocked—using panel source again."); }}
+                    onClick={() => { 
+                      setLockedTemplateId(null);
+                      if (graph && contextFrame?.sessionId) {
+                        const locks = getSessionLocks(graph, contextFrame.sessionId);
+                        const updatedLocks = { ...locks, lockedTemplateIds: [] };
+                        setSessionLocks(graph, contextFrame.sessionId, updatedLocks);
+                      }
+                      alert("Unlocked—using panel source again."); 
+                    }}
                   >
                     Unlock
                   </Button>
@@ -1090,10 +1213,24 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                 <p className="text-xs text-gray-600">
                   When locked, Generate will mutate this template only—no new patterns are invented.
                 </p>
-                {lockedDoc ? (
+                {lockedTemplateId ? (
                   <div className="text-xs rounded bg-gray-100 p-2">
                     <div className="font-medium mb-1">Locked Template</div>
-                    <div>{(lockedDoc.blocks[0] as any).phraseText}</div>
+                    <div>Template ID: {lockedTemplateId}</div>
+                    <button 
+                      onClick={() => {
+                        setLockedTemplateId(null);
+                        if (graph && contextFrame?.sessionId) {
+                          const locks = getSessionLocks(graph, contextFrame.sessionId);
+                          const updatedLocks = { ...locks, lockedTemplateIds: [] };
+                          setSessionLocks(graph, contextFrame.sessionId, updatedLocks);
+                        }
+                        alert("Template unlocked");
+                      }}
+                      className="mt-1 text-blue-600 hover:text-blue-800 underline"
+                    >
+                      Unlock
+                    </button>
                   </div>
                 ) : null}
               </CardContent>
@@ -1339,7 +1476,15 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
                   </Button>
                   <Button
                     variant="secondary"
-                    onClick={() => { setLockedDoc(null); alert("Unlocked—using panel source again."); }}
+                    onClick={() => { 
+                      setLockedTemplateId(null);
+                      if (graph && contextFrame?.sessionId) {
+                        const locks = getSessionLocks(graph, contextFrame.sessionId);
+                        const updatedLocks = { ...locks, lockedTemplateIds: [] };
+                        setSessionLocks(graph, contextFrame.sessionId, updatedLocks);
+                      }
+                      alert("Unlocked—using panel source again."); 
+                    }}
                   >
                     Unlock
                   </Button>

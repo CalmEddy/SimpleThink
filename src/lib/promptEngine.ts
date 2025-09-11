@@ -4,8 +4,9 @@ import type { TemplateMutator, MutatorUtils } from './prompter/index.js';
 import type { ContextualNodeSets } from '../contexts/ActiveNodesContext.js';
 import { TEMPLATES, getRandomWordForSlot } from './templates.js';
 import { surfaceRelatedPhrases } from './retrieve.js';
-import { listSessionTemplates } from './sessionTemplates.js';
+import { listSessionTemplates } from './userTemplates.js';
 import { getSessionLocks } from './sessionLocks.js';
+import { ensureDefaultProfileExists } from './sessionProfiles.js';
 import wordBank from './templates.js';
 import { tenseConverter, type MorphologicalType } from './tenseConverter.js';
 import { parseTemplateTextToTokens, buildBindings } from './parseTemplateText.js';
@@ -31,11 +32,14 @@ export class PromptEngine {
   private cachedMutators: TemplateMutator[] | null = null;
   private lastMutatorConfig: string = "";
   
-  // Configuration for advanced mutators
-  private useJitter: boolean = true;
+  // Track if engine has been initialized with default profile
+  private initializedFromDefaultProfile: boolean = false;
+  
+  // Configuration for advanced mutators - loaded from default profile
+  private useJitter: boolean = false;
   private jitterP: number = 30;
-  private useAutoBind: boolean = true;
-  private useEnsure2: boolean = true;
+  private useAutoBind: boolean = false;
+  private useEnsure2: boolean = false;
   private useRandNouns: boolean = false;
   private useMaxRandomization: boolean = false;
   private maxRandomSlots: number = 2;
@@ -62,6 +66,83 @@ export class PromptEngine {
       PromptEngine.instance = new PromptEngine();
     }
     return PromptEngine.instance;
+  }
+
+  /**
+   * Load configuration from the default profile
+   */
+  loadFromDefaultProfile(sessionId: string): void {
+    try {
+      const defaultProfile = ensureDefaultProfileExists(sessionId);
+      
+      // Load mutator settings from default profile
+      this.useJitter = defaultProfile.useJitter;
+      this.jitterP = defaultProfile.jitterP;
+      this.useAutoBind = defaultProfile.useAutoBind;
+      this.useEnsure2 = defaultProfile.useEnsure2;
+      this.useRandNouns = defaultProfile.useRandNouns;
+      this.useMaxRandomization = defaultProfile.useMaxRandomization;
+      this.maxRandomSlots = defaultProfile.maxRandomSlots;
+      this.usePositionBasedRandom = defaultProfile.usePositionBasedRandom;
+      this.targetPOS = defaultProfile.targetPOS;
+      this.targetPosition = defaultProfile.targetPosition;
+      this.useClickableSelection = defaultProfile.useClickableSelection;
+      this.selectedPhrase = defaultProfile.selectedPhraseId ? { id: defaultProfile.selectedPhraseId } : null;
+      this.selectedWordIndices = new Set(defaultProfile.selectedWordIndices);
+      this.posRandomP = { ...defaultProfile.posRandomP };
+      this.regexText = defaultProfile.regexText;
+      this.regexRandomizeP = defaultProfile.regexRandomizeP;
+      
+      // Clear cached mutators to force rebuild with new settings
+      this.cachedMutators = null;
+      this.lastMutatorConfig = "";
+    } catch (error) {
+      console.warn('Failed to load default profile, using fallback settings:', error);
+      // Keep current settings (which are initialized to false/empty)
+    }
+  }
+
+  /**
+   * Update mutator configuration (used by dev panel)
+   */
+  updateMutatorConfig(config: {
+    useJitter?: boolean;
+    jitterP?: number;
+    useAutoBind?: boolean;
+    useEnsure2?: boolean;
+    useRandNouns?: boolean;
+    useMaxRandomization?: boolean;
+    maxRandomSlots?: number;
+    usePositionBasedRandom?: boolean;
+    targetPOS?: POS;
+    targetPosition?: number;
+    useClickableSelection?: boolean;
+    selectedPhrase?: any;
+    selectedWordIndices?: Set<number>;
+    posRandomP?: Record<POS, number>;
+    regexText?: string;
+    regexRandomizeP?: number;
+  }): void {
+    if (config.useJitter !== undefined) this.useJitter = config.useJitter;
+    if (config.jitterP !== undefined) this.jitterP = config.jitterP;
+    if (config.useAutoBind !== undefined) this.useAutoBind = config.useAutoBind;
+    if (config.useEnsure2 !== undefined) this.useEnsure2 = config.useEnsure2;
+    if (config.useRandNouns !== undefined) this.useRandNouns = config.useRandNouns;
+    if (config.useMaxRandomization !== undefined) this.useMaxRandomization = config.useMaxRandomization;
+    if (config.maxRandomSlots !== undefined) this.maxRandomSlots = config.maxRandomSlots;
+    if (config.usePositionBasedRandom !== undefined) this.usePositionBasedRandom = config.usePositionBasedRandom;
+    if (config.targetPOS !== undefined) this.targetPOS = config.targetPOS;
+    if (config.targetPosition !== undefined) this.targetPosition = config.targetPosition;
+    if (config.useClickableSelection !== undefined) this.useClickableSelection = config.useClickableSelection;
+    if (config.selectedPhrase !== undefined) this.selectedPhrase = config.selectedPhrase;
+    if (config.selectedWordIndices !== undefined) this.selectedWordIndices = config.selectedWordIndices;
+    if (config.posRandomP !== undefined) this.posRandomP = { ...config.posRandomP };
+    if (config.regexText !== undefined) this.regexText = config.regexText;
+    if (config.regexRandomizeP !== undefined) this.regexRandomizeP = config.regexRandomizeP;
+    
+    // Clear cached mutators to force rebuild with new settings
+    this.cachedMutators = null;
+    this.lastMutatorConfig = "";
   }
 
   async buildPromptFromPhrase(
@@ -359,23 +440,116 @@ export class PromptEngine {
   /**
    * Build active source from contextual nodes (moved from PrompterDevPanel)
    */
-  buildActiveSource(activeCtx: ContextualNodeSets, lockedDoc?: TemplateDoc): TemplateSource {
+  buildActiveSource(activeCtx: ContextualNodeSets, lockedDoc?: TemplateDoc, lockedTemplateId?: string, sessionId?: string, templateMixRatio = 0.5): TemplateSource {
     return async () => {
       if (lockedDoc) return [lockedDoc];
+      
+      // If we have a locked template ID, find and return only that template
+      if (lockedTemplateId) {
+        // Look for the locked template in phrases and chunks
+        for (const ph of (activeCtx?.phrases ?? [])) {
+          if (ph.id === lockedTemplateId) {
+            const doc = this.buildDocFromPhraseNode(ph);
+            return [doc];
+          }
+        }
+        for (const ch of (activeCtx?.chunks ?? [])) {
+          if (ch.id === lockedTemplateId) {
+            const doc = this.buildDocFromChunkNode(ch);
+            return [doc];
+          }
+        }
+        // If locked template not found, return empty array
+        return [];
+      }
+      
       const out: TemplateDoc[] = [];
 
-      // 1) Phrase-derived docs
-      for (const ph of (activeCtx?.phrases ?? [])) {
-        const doc = this.buildDocFromPhraseNode(ph);
-        out.push(doc);
+      // Get user templates if sessionId is provided
+      let userTemplates: any[] = [];
+      if (sessionId) {
+        userTemplates = listSessionTemplates(sessionId);
       }
 
-      // 2) Chunk-derived docs
-      for (const ch of (activeCtx?.chunks ?? [])) {
-        const doc = this.buildDocFromChunkNode(ch);
-        out.push(doc);
+      // Calculate how many templates to use from each source
+      const totalTemplates = Math.max(1, (activeCtx?.phrases?.length ?? 0) + (activeCtx?.chunks?.length ?? 0) + userTemplates.length);
+      const userTemplateCount = Math.round(totalTemplates * templateMixRatio);
+      const generatedTemplateCount = totalTemplates - userTemplateCount;
+
+      // 1) Add user templates based on mix ratio
+      if (userTemplates.length > 0 && userTemplateCount > 0) {
+        const userTemplatesToUse = Math.min(userTemplateCount, userTemplates.length);
+        const shuffledUserTemplates = [...userTemplates].sort(() => Math.random() - 0.5);
+        
+        for (let i = 0; i < userTemplatesToUse; i++) {
+          const template = shuffledUserTemplates[i];
+          // Convert UnifiedTemplate to TemplateDoc
+          const templateDoc = this.convertUnifiedTemplateToTemplateDoc(template);
+          out.push(templateDoc);
+        }
       }
+
+      // 2) Add phrase-derived docs based on remaining ratio
+      const phrasesToUse = Math.min(generatedTemplateCount, activeCtx?.phrases?.length ?? 0);
+      if (phrasesToUse > 0) {
+        const shuffledPhrases = [...(activeCtx?.phrases ?? [])].sort(() => Math.random() - 0.5);
+        for (let i = 0; i < phrasesToUse; i++) {
+          const doc = this.buildDocFromPhraseNode(shuffledPhrases[i]);
+          out.push(doc);
+        }
+      }
+
+      // 3) Add chunk-derived docs if we still need more
+      const remainingSlots = generatedTemplateCount - phrasesToUse;
+      if (remainingSlots > 0) {
+        const chunksToUse = Math.min(remainingSlots, activeCtx?.chunks?.length ?? 0);
+        if (chunksToUse > 0) {
+          const shuffledChunks = [...(activeCtx?.chunks ?? [])].sort(() => Math.random() - 0.5);
+          for (let i = 0; i < chunksToUse; i++) {
+            const doc = this.buildDocFromChunkNode(shuffledChunks[i]);
+            out.push(doc);
+          }
+        }
+      }
+
       return out;
+    };
+  }
+
+  /**
+   * Convert UnifiedTemplate to TemplateDoc for use in prompt generation
+   */
+  convertUnifiedTemplateToTemplateDoc(unifiedTemplate: any): TemplateDoc {
+    const blocks = unifiedTemplate.tokens.map((token: any) => {
+      if (token.kind === 'literal') {
+        return {
+          kind: 'text' as const,
+          text: token.surface
+        };
+      } else if (token.kind === 'slot') {
+        return {
+          kind: 'text' as const,
+          text: `[${token.pos}]`
+        };
+      } else if (token.kind === 'subtemplate') {
+        return {
+          kind: 'text' as const,
+          text: token.tokens.map((t: any) => 
+            t.kind === 'literal' ? t.surface : `[${t.pos || 'NOUN'}]`
+          ).join(' ')
+        };
+      } else {
+        return {
+          kind: 'text' as const,
+          text: ''
+        };
+      }
+    });
+
+    return {
+      id: unifiedTemplate.id,
+      blocks: blocks.filter((block: any) => block.text.trim() !== ''),
+      createdInSessionId: unifiedTemplate.createdInSessionId
     };
   }
 
@@ -591,9 +765,17 @@ export class PromptEngine {
     graph: SemanticGraphLite,
     sessionId: string,
     rng?: RNG,
-    lockedDoc?: TemplateDoc
+    lockedDoc?: TemplateDoc,
+    lockedTemplateId?: string,
+    templateMixRatio = 0.5
   ): Promise<{ prompt: string; templateId: string; templateText: string; debug: any }> {
-    const activeSource = this.buildActiveSource(activeCtx, lockedDoc);
+    // Initialize from default profile only once
+    if (!this.initializedFromDefaultProfile) {
+      this.loadFromDefaultProfile(sessionId);
+      this.initializedFromDefaultProfile = true;
+    }
+    
+    const activeSource = this.buildActiveSource(activeCtx, lockedDoc, lockedTemplateId, sessionId, templateMixRatio);
     const configurableMutators = this.buildConfigurableMutators();
     
     // Initialize or update the single Prompter instance
@@ -618,7 +800,8 @@ export class PromptEngine {
     activeCtx: ContextualNodeSets,
     sessionId: string,
     count = 20,
-    seed?: number
+    seed?: number,
+    templateMixRatio = 0.5
   ): Promise<EphemeralPrompt[]> {
     const rng = seed ? { next: () => Math.random() } : undefined; // Simple RNG for now
     const out: EphemeralPrompt[] = [];
@@ -626,7 +809,7 @@ export class PromptEngine {
 
     for (let i = 0; i < count; i++) {
       try {
-        const res = await this.generateEnhancedPrompt(activeCtx, graph, sessionId, rng);
+        const res = await this.generateEnhancedPrompt(activeCtx, graph, sessionId, rng, undefined, undefined, templateMixRatio);
         
         if (recentTexts.has(res.prompt)) continue;
         recentTexts.add(res.prompt);

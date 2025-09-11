@@ -23,10 +23,11 @@ export async function generateEphemeralPrompts(
   ctx: ContextualNodeSets,
   sessionId: string,
   count = 20,
-  seed?: number
+  seed?: number,
+  templateMixRatio = 0.5
 ): Promise<EphemeralPrompt[]> {
   // Route through the enhanced PromptEngine
-  return await promptEngine.generateEphemeralPromptsEnhanced(graph, ctx, sessionId, count, seed);
+  return await promptEngine.generateEphemeralPromptsEnhanced(graph, ctx, sessionId, count, seed, templateMixRatio);
 }
 
 /**

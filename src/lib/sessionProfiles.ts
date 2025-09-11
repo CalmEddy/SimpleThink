@@ -1,7 +1,33 @@
 import { PromptGenerationProfile, POS } from '../types/index.js';
 import { v4 as uuid } from 'uuid';
 
-const store = new Map<string /*sessionId*/, PromptGenerationProfile[]>();
+const PROFILE_STORAGE_KEY = 'thinkcraft-profiles';
+
+// Helper functions for localStorage persistence
+function loadProfilesFromStorage(): Map<string, PromptGenerationProfile[]> {
+  try {
+    const stored = localStorage.getItem(PROFILE_STORAGE_KEY);
+    if (stored) {
+      const data = JSON.parse(stored);
+      return new Map(Object.entries(data));
+    }
+  } catch (error) {
+    console.warn('Failed to load profiles from storage:', error);
+  }
+  return new Map();
+}
+
+function saveProfilesToStorage(store: Map<string, PromptGenerationProfile[]>): void {
+  try {
+    const data = Object.fromEntries(store);
+    localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(data));
+  } catch (error) {
+    console.warn('Failed to save profiles to storage:', error);
+  }
+}
+
+// Initialize store from localStorage
+const store = loadProfilesFromStorage();
 
 // Default POS list for initializing profiles
 const ALL_POS: POS[] = [
@@ -22,6 +48,7 @@ export function addSessionProfile(sessionId: string, profile: Omit<PromptGenerat
   };
   arr.push(created);
   store.set(sessionId, arr);
+  saveProfilesToStorage(store);
   return created;
 }
 
@@ -32,6 +59,7 @@ export function updateSessionProfile(sessionId: string, profileId: string, patch
   if (idx === -1) return;
   arr[idx] = { ...arr[idx], ...patch };
   store.set(sessionId, arr);
+  saveProfilesToStorage(store);
   return arr[idx];
 }
 
@@ -40,10 +68,12 @@ export function removeSessionProfile(sessionId: string, profileId: string): void
   if (!arr) return;
   const next = arr.filter(p => p.id !== profileId);
   store.set(sessionId, next);
+  saveProfilesToStorage(store);
 }
 
 export function clearSessionProfiles(sessionId: string): void {
   store.delete(sessionId);
+  saveProfilesToStorage(store);
 }
 
 export function getSessionProfile(sessionId: string, profileId: string): PromptGenerationProfile | undefined {
@@ -52,7 +82,7 @@ export function getSessionProfile(sessionId: string, profileId: string): PromptG
   return arr.find(p => p.id === profileId);
 }
 
-export function createDefaultProfile(sessionId: string, name: string, description?: string): PromptGenerationProfile {
+export function createDefaultProfile(sessionId: string, name: string = 'default', description?: string): PromptGenerationProfile {
   const defaultProfile: Omit<PromptGenerationProfile, 'id' | 'createdInSessionId' | 'createdAt'> = {
     name,
     description,
@@ -93,6 +123,18 @@ export function createDefaultProfile(sessionId: string, name: string, descriptio
   };
   
   return addSessionProfile(sessionId, defaultProfile);
+}
+
+export function ensureDefaultProfileExists(sessionId: string): PromptGenerationProfile {
+  const profiles = listSessionProfiles(sessionId);
+  const defaultProfile = profiles.find(p => p.name === 'default');
+  
+  if (defaultProfile) {
+    return defaultProfile;
+  }
+  
+  // Create default profile if it doesn't exist
+  return createDefaultProfile(sessionId, 'default', 'Default profile for prompt generation');
 }
 
 export function duplicateProfile(sessionId: string, profileId: string, newName: string): PromptGenerationProfile | undefined {

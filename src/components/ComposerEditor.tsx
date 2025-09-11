@@ -5,6 +5,7 @@ import { analyzeFreeText, resolvePhraseTokens, generateFromDocAsync, convertTemp
 import { realizeTemplate } from '../lib/fillTemplate';
 import { wordBank } from '../lib/templates';
 import { parseTemplateTextToTokens } from '../lib/parseTemplateText';
+import { addSessionTemplate, saveAllTemplates, loadTemplatesFromFile, listSessionTemplates, removeSessionTemplate, updateSessionTemplate } from '../lib/userTemplates.js';
 
 type MorphMenuState = {
   open: boolean;
@@ -237,6 +238,8 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
   const [rawTextMode, setRawTextMode] = useState<boolean>(false);
   const [rawText, setRawText] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [userTemplates, setUserTemplates] = useState<any[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
 
   // Get phrases from context
   const phrases = useMemo(() => {
@@ -244,6 +247,117 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
     if (!ctx?.phrases) return [];
     return ctx.phrases;
   }, [ctx?.phrases]);
+
+  // Load user templates on component mount
+  useEffect(() => {
+    const templates = listSessionTemplates(sessionId);
+    setUserTemplates(templates);
+  }, [sessionId]);
+
+  // Load a template into the composer
+  const loadTemplateIntoComposer = async (template: any) => {
+    try {
+      setSelectedTemplateId(template.id);
+      
+      // Convert UnifiedTemplate to TemplateDoc
+      const templateText = template.text;
+      
+      // Parse the template text to create blocks
+      if (isTemplateDSL(templateText)) {
+        // Parse as template DSL
+        const parsed = parseTemplateTextToTokens(templateText);
+        const blocks: TemplateBlock[] = [];
+        
+        // Convert tokens to blocks
+        for (const token of parsed) {
+          if (token.kind === 'literal') {
+            blocks.push({
+              kind: 'text',
+              text: token.surface
+            });
+          } else if (token.kind === 'slot') {
+            blocks.push({
+              kind: 'text',
+              text: `[${token.pos}]`
+            });
+          }
+        }
+        
+        setDoc({
+          id: template.id,
+          blocks: blocks,
+          createdInSessionId: sessionId
+        });
+      } else {
+        // Parse as free text
+        const blocks: TemplateBlock[] = [{
+          kind: 'text',
+          text: templateText
+        }];
+        
+        setDoc({
+          id: template.id,
+          blocks: blocks,
+          createdInSessionId: sessionId
+        });
+      }
+      
+      // Update preview
+      setPreview(templateText);
+    } catch (error) {
+      console.error('Failed to load template:', error);
+      alert('Failed to load template. Check console for details.');
+    }
+  };
+
+  // Save current composer state back to template
+  const saveCurrentTemplate = async () => {
+    if (!selectedTemplateId) {
+      alert('No template selected to save');
+      return;
+    }
+
+    try {
+      const currentText = convertTemplateDocToText(doc);
+      await updateSessionTemplate(sessionId, selectedTemplateId, {
+        text: currentText
+      });
+      
+      // Refresh templates list
+      const templates = listSessionTemplates(sessionId);
+      setUserTemplates(templates);
+      
+      alert('Template saved successfully!');
+    } catch (error) {
+      console.error('Failed to save template:', error);
+      alert('Failed to save template. Check console for details.');
+    }
+  };
+
+  // Delete a template
+  const deleteTemplate = async (templateId: string) => {
+    if (!confirm('Are you sure you want to delete this template?')) {
+      return;
+    }
+
+    try {
+      await removeSessionTemplate(sessionId, templateId);
+      
+      // Refresh templates list
+      const templates = listSessionTemplates(sessionId);
+      setUserTemplates(templates);
+      
+      // Clear selection if deleted template was selected
+      if (selectedTemplateId === templateId) {
+        setSelectedTemplateId(null);
+      }
+      
+      alert('Template deleted successfully!');
+    } catch (error) {
+      console.error('Failed to delete template:', error);
+      alert('Failed to delete template. Check console for details.');
+    }
+  };
 
   // Get unique chunks from context, filtered by pattern
   const chunks = useMemo(() => {
@@ -567,6 +681,63 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
               <div className="text-sm text-gray-500 italic">No chunks available</div>
             )}
           </div>
+          
+          {/* User Templates */}
+          <div className="mb-2 text-sm font-semibold mt-6">User Templates</div>
+          <div className="max-h-48 overflow-y-auto space-y-2">
+            {userTemplates.length > 0 ? (
+              userTemplates.map((template, idx) => (
+                <div
+                  key={template.id}
+                  className={`text-left rounded border px-2 py-1 w-full ${
+                    selectedTemplateId === template.id 
+                      ? 'bg-blue-100 border-blue-300' 
+                      : 'bg-white hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-start justify-between">
+                    <button
+                      className="flex-1 text-left"
+                      onClick={() => loadTemplateIntoComposer(template)}
+                      title={template.text}
+                    >
+                      <div className="font-medium text-sm truncate">{template.text}</div>
+                      {template.tags && template.tags.length > 0 && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          Tags: {template.tags.join(', ')}
+                        </div>
+                      )}
+                    </button>
+                    <button
+                      className="ml-2 text-red-500 hover:text-red-700 p-1"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteTemplate(template.id);
+                      }}
+                      title="Delete template"
+                    >
+                      🗑️
+                    </button>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="text-sm text-gray-500 italic">No user templates yet</div>
+            )}
+          </div>
+          
+          {/* Template Actions */}
+          {selectedTemplateId && (
+            <div className="mt-3 pt-3 border-t">
+              <div className="text-xs text-gray-600 mb-2">Template Actions:</div>
+              <button
+                className="w-full px-3 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700"
+                onClick={saveCurrentTemplate}
+              >
+                💾 Save Changes
+              </button>
+            </div>
+          )}
         </div>
         {/* Inline composer (always shows preview) */}
         <div className="flex-1">
@@ -775,6 +946,75 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
               >
                 Import .tml
               </button>
+            </div>
+            
+            {/* File Operations */}
+            <div className="border-t pt-3 mt-3">
+              <div className="text-sm font-semibold mb-2">Template File Operations</div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  className="rounded bg-blue-600 text-white px-3 py-1 text-xs flex items-center justify-center gap-1"
+                  onClick={async () => {
+                    try {
+                      const templateText = convertTemplateDocToText(doc);
+                      await addSessionTemplate(sessionId, {
+                        text: templateText,
+                        pinned: false,
+                        tags: ['composer'],
+                        origin: 'user'
+                      });
+                      
+                      // Refresh templates list
+                      const templates = listSessionTemplates(sessionId);
+                      setUserTemplates(templates);
+                      
+                      alert('Template saved to session successfully!');
+                    } catch (error) {
+                      console.error('Failed to save template:', error);
+                      alert('Failed to save template to session. Check console for details.');
+                    }
+                  }}
+                >
+                  💾 Save to Session
+                </button>
+                
+                <button
+                  className="rounded border border-blue-600 text-blue-600 px-3 py-1 text-xs flex items-center justify-center gap-1"
+                  onClick={async () => {
+                    try {
+                      await saveAllTemplates();
+                      alert('All templates saved to file successfully!');
+                    } catch (error) {
+                      console.error('Failed to save all templates:', error);
+                      alert('Failed to save all templates to file. Check console for details.');
+                    }
+                  }}
+                >
+                  💾 Save
+                </button>
+                
+                <button
+                  className="rounded border border-green-600 text-green-600 px-3 py-1 text-xs flex items-center justify-center gap-1"
+                  onClick={async () => {
+                    try {
+                      await loadTemplatesFromFile();
+                      alert('Templates loaded from file successfully!');
+                      // Refresh the templates list
+                      setUserTemplates(listSessionTemplates(sessionId));
+                    } catch (error) {
+                      console.error('Failed to load templates:', error);
+                      alert('Failed to load templates from file. Check console for details.');
+                    }
+                  }}
+                >
+                  📂 Load
+                </button>
+              </div>
+              <div className="text-xs text-gray-600 mt-2">
+                <div>• <strong>Save to Session:</strong> Add current template to session templates</div>
+                <div>• <strong>Save:</strong> Save all templates from all sessions to file</div>
+                <div>• <strong>Load:</strong> Load templates from file and merge with existing</div>
+              </div>
             </div>
             {/* Preview */}
             <div>
