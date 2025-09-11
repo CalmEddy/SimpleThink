@@ -426,16 +426,13 @@ function chooseFromBank(pos: ReturnType<typeof basePOSOf>): string {
   if (Array.isArray(bank) && bank.length) {
     return String(bank[Math.floor(Math.random() * bank.length)]);
   }
-  // ultra-safe fallback
-  const defaults: Record<string, string[]> = {
-    NOUN: ['thing','idea','friend','dog','chair'],
-    VERB: ['run','make','get','play','see'],
-    ADJ:  ['big','small','funny','weird','bright'],
-    ADV:  ['quickly','slowly','loudly','softly'],
-    PROPN:['Alice','Bob'],
-  };
-  const pick = defaults[pos] ?? defaults['NOUN'];
-  return pick[Math.floor(Math.random() * pick.length)];
+  // Use main wordBank as fallback (it should always have words)
+  const fallback = (wordBank as any)?.[pos] || (wordBank as any)?.['NOUN'];
+  if (Array.isArray(fallback) && fallback.length) {
+    return String(fallback[Math.floor(Math.random() * fallback.length)]);
+  }
+  // Ultimate fallback to slot name
+  return pos.toLowerCase();
 }
 
 // === NEW: helpers for the inline editor ===

@@ -6,7 +6,7 @@
 describe("pipeline guard", () => {
   it("prevents direct realizeTemplate usage", () => {
     // Import the guardrail function
-    const { __FORBID_DIRECT_REALIZE_TEMPLATE__ } = require("../lib/promptEngine.js");
+    const { __FORBID_DIRECT_REALIZE_TEMPLATE__ } = require("../lib/promptEngine");
     
     // This should throw an error
     expect(() => __FORBID_DIRECT_REALIZE_TEMPLATE__()).toThrow(

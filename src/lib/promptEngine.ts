@@ -1,5 +1,6 @@
 import type { SemanticGraphLite } from './semanticGraphLite.js';
-import type { PhraseNode, PromptNode, PromptSlotBinding, UserTemplate, SlotDescriptor, POS, SessionLocks, EphemeralPrompt, WordNode, MorphFeature, UnifiedTemplate, TemplateToken } from '../types/index.js';
+import type { PhraseNode, PromptNode, PromptSlotBinding, UserTemplate, SlotDescriptor, POS, SessionLocks, EphemeralPrompt, WordNode, MorphFeature, UnifiedTemplate, TemplateToken, TemplateDoc, TemplateBlock, PhraseBlock, PhraseToken } from '../types/index.js';
+import type { TemplateMutator, MutatorUtils } from './prompter/index.js';
 import type { ContextualNodeSets } from '../contexts/ActiveNodesContext.js';
 import { TEMPLATES, getRandomWordForSlot } from './templates.js';
 import { surfaceRelatedPhrases } from './retrieve.js';
@@ -9,6 +10,10 @@ import wordBank from './templates.js';
 import { tenseConverter, type MorphologicalType } from './tenseConverter.js';
 import { parseTemplateTextToTokens, buildBindings } from './parseTemplateText.js';
 import { realizeTemplate } from './fillTemplate.js';
+import { Prompter, mutatorJitter30, mutatorAutoBind, mutatorEnsure2Random, mutatorRandomizeNouns, type TemplateSource, type RNG } from './prompter/index.js';
+import { templateDocsFromGraph } from './prompter/unifiedSource.js';
+import { parseTextPatternsToUTA } from '../components/ComposerEditor.js';
+import { convertTemplateDocToUnified } from './composer.js';
 
 export interface PromptResult {
   promptText: string;
@@ -19,8 +24,37 @@ export interface PromptResult {
 export class PromptEngine {
   private static instance: PromptEngine;
   
+  // Single Prompter instance for reuse
+  private prompter: Prompter | null = null;
+  
+  // Cached mutators to avoid recreation
+  private cachedMutators: TemplateMutator[] | null = null;
+  private lastMutatorConfig: string = "";
+  
+  // Configuration for advanced mutators
+  private useJitter: boolean = true;
+  private jitterP: number = 30;
+  private useAutoBind: boolean = true;
+  private useEnsure2: boolean = true;
+  private useRandNouns: boolean = false;
+  private useMaxRandomization: boolean = false;
+  private maxRandomSlots: number = 2;
+  private usePositionBasedRandom: boolean = false;
+  private targetPOS: POS = 'NOUN';
+  private targetPosition: number = 1;
+  private useClickableSelection: boolean = false;
+  private selectedPhrase: any = null;
+  private selectedWordIndices: Set<number> = new Set();
+  private posRandomP: Record<POS, number> = {};
+  private regexText: string = "";
+  private regexRandomizeP: number = 0;
+  
   private constructor() {
-    // Private constructor for singleton
+    // Initialize POS randomization probabilities
+    const ALL_POS: POS[] = [
+      "NOUN", "VERB", "ADJ", "ADV", "DET", "PRON", "ADP", "AUX", "CONJ", "SCONJ", "PART", "NUM", "INTJ", "PROPN"
+    ] as const as POS[];
+    this.posRandomP = ALL_POS.reduce((acc, pos) => (acc[pos] = 0, acc), {} as Record<POS, number>);
   }
 
   static getInstance(): PromptEngine {
@@ -228,6 +262,389 @@ export class PromptEngine {
   async convertWordToMorph(word: WordNode, basePos: string, morph: string): Promise<string> {
     const morphType = morph as MorphologicalType;
     return await tenseConverter.convertWord(word.lemma, basePos, morphType);
+  }
+
+  /**
+   * Initialize or update the single Prompter instance
+   */
+  private initializePrompter(activeSource: TemplateDoc[], configurableMutators: TemplateMutator[], rng?: RNG): void {
+    if (!this.prompter) {
+      // Create new instance
+      this.prompter = new Prompter({
+        source: activeSource,
+        rng: rng as any,
+        mutators: configurableMutators,
+      });
+    } else {
+      // Update existing instance configuration
+      this.prompter.updateConfig({
+        source: activeSource,
+        rng: rng as any,
+        mutators: configurableMutators,
+      });
+    }
+  }
+
+  // ===== NEW ENHANCED TEMPLATE BUILDING SYSTEM =====
+
+  /**
+   * Build a TemplateDoc from a phrase node (moved from PrompterDevPanel)
+   */
+  buildDocFromPhraseNode(ph: any): TemplateDoc {
+    const words = this.tokenizeSurfaceWords(String(ph.text));
+    const pos = String(ph.posPattern).split("-").map((p) => p.trim()).filter(Boolean);
+    const len = Math.max(words.length, pos.length);
+    const tokens = Array.from({ length: len }).map((_, i) => {
+      const w = words[i] ?? "";
+      const p = (pos[i] ?? (pos[pos.length - 1] ?? "NOUN")) as POS;
+      return {
+        text: w || `[${p}]`,
+        lemma: "",
+        pos: p,
+        posSet: [p],
+        randomize: false,
+        slotLabel: null,
+        morph: null,
+      } as PhraseToken;
+    });
+    return {
+      id: ph.id ?? `locked_phrase_${Date.now()}`,
+      createdInSessionId: "promptengine",
+      blocks: [{
+        kind: "phrase",
+        phraseText: String(ph.text),
+        tokens
+      } as PhraseBlock]
+    };
+  }
+
+  /**
+   * Build a TemplateDoc from a chunk node (moved from PrompterDevPanel)
+   */
+  buildDocFromChunkNode(ch: any): TemplateDoc {
+    const words = this.tokenizeSurfaceWords(String(ch.text));
+    const pos = String(ch.posPattern).split("-").map((p) => p.trim()).filter(Boolean);
+    const len = Math.max(words.length, pos.length);
+    const tokens = Array.from({ length: len }).map((_, i) => {
+      const w = words[i] ?? "";
+      const p = (pos[i] ?? (pos[pos.length - 1] ?? "NOUN")) as POS;
+      return {
+        text: w || `[${p}]`,
+        lemma: "",
+        pos: p,
+        posSet: [p],
+        randomize: false,
+        slotLabel: null,
+        morph: null,
+      } as PhraseToken;
+    });
+    return {
+      id: ch.id ?? `locked_chunk_${Date.now()}`,
+      createdInSessionId: "promptengine",
+      blocks: [{
+        kind: "phrase",
+        phraseText: String(ch.text),
+        tokens
+      } as PhraseBlock]
+    };
+  }
+
+  /**
+   * Simple tokenization that preserves word order
+   */
+  private tokenizeSurfaceWords(s: string): string[] {
+    return s.trim().split(/\s+/);
+  }
+
+  /**
+   * Build active source from contextual nodes (moved from PrompterDevPanel)
+   */
+  buildActiveSource(activeCtx: ContextualNodeSets, lockedDoc?: TemplateDoc): TemplateSource {
+    return async () => {
+      if (lockedDoc) return [lockedDoc];
+      const out: TemplateDoc[] = [];
+
+      // 1) Phrase-derived docs
+      for (const ph of (activeCtx?.phrases ?? [])) {
+        const doc = this.buildDocFromPhraseNode(ph);
+        out.push(doc);
+      }
+
+      // 2) Chunk-derived docs
+      for (const ch of (activeCtx?.chunks ?? [])) {
+        const doc = this.buildDocFromChunkNode(ch);
+        out.push(doc);
+      }
+      return out;
+    };
+  }
+
+  /**
+   * Build configurable mutators system (moved from PrompterDevPanel) with caching
+   */
+  buildConfigurableMutators(): TemplateMutator[] {
+    // Create a config signature to check if mutators need to be rebuilt
+    const configSignature = JSON.stringify({
+      useJitter: this.useJitter,
+      jitterP: this.jitterP,
+      useAutoBind: this.useAutoBind,
+      useEnsure2: this.useEnsure2,
+      useRandNouns: this.useRandNouns,
+      useMaxRandomization: this.useMaxRandomization,
+      maxRandomSlots: this.maxRandomSlots,
+      usePositionBasedRandom: this.usePositionBasedRandom,
+      targetPOS: this.targetPOS,
+      targetPosition: this.targetPosition,
+      useClickableSelection: this.useClickableSelection,
+      regexText: this.regexText,
+      regexRandomizeP: this.regexRandomizeP
+    });
+
+    // Return cached mutators if configuration hasn't changed
+    if (this.cachedMutators && this.lastMutatorConfig === configSignature) {
+      return this.cachedMutators;
+    }
+
+    const result: TemplateMutator[] = [];
+
+    if (this.useJitter) {
+      const p = Math.max(0, Math.min(100, this.jitterP)) / 100;
+      result.push(function jitterScaled(doc, utils) {
+        return utils.jitterSlots(doc, p);
+      });
+    }
+    if (this.useAutoBind) result.push(mutatorAutoBind);
+    if (this.useEnsure2) result.push(mutatorEnsure2Random);
+    if (this.useRandNouns) result.push(mutatorRandomizeNouns);
+
+    // Advanced slot randomization mutators
+    if (this.useMaxRandomization) {
+      result.push((doc) => {
+        const blocks = doc.blocks.map((b: TemplateBlock) => {
+          if (b.kind !== "phrase") return b;
+          const pb = b as PhraseBlock;
+          const randomizableTokens = pb.tokens
+            .map((t, i) => ({ token: t, index: i }))
+            .filter(({ token }) => /[A-Za-z]/.test(token.text) && !token.randomize);
+          
+          const toRandomize = Math.min(this.maxRandomSlots, randomizableTokens.length);
+          const selected = new Set<number>();
+          while (selected.size < toRandomize && selected.size < randomizableTokens.length) {
+            const randomIndex = Math.floor(Math.random() * randomizableTokens.length);
+            selected.add(randomizableTokens[randomIndex].index);
+          }
+          
+          const tokens = pb.tokens.map((t, i) => 
+            selected.has(i) ? { ...t, randomize: true } : t
+          );
+          return { ...pb, tokens } as PhraseBlock;
+        });
+        return { ...doc, blocks };
+      });
+    }
+
+    if (this.usePositionBasedRandom) {
+      result.push((doc) => {
+        const blocks = doc.blocks.map((b: TemplateBlock) => {
+          if (b.kind !== "phrase") return b;
+          const pb = b as PhraseBlock;
+          
+          const matchingTokens = pb.tokens
+            .map((t, i) => ({ token: t, index: i }))
+            .filter(({ token }) => 
+              token.pos === this.targetPOS || (token.posSet && token.posSet.includes(this.targetPOS))
+            );
+          
+          if (matchingTokens.length >= this.targetPosition) {
+            const targetIndex = matchingTokens[this.targetPosition - 1].index;
+            const tokens = pb.tokens.map((t, i) => 
+              i === targetIndex ? { ...t, randomize: true } : t
+            );
+            return { ...pb, tokens } as PhraseBlock;
+          }
+          
+          return pb;
+        });
+        return { ...doc, blocks };
+      });
+    }
+
+    if (this.useClickableSelection && this.selectedPhrase && this.selectedWordIndices.size > 0) {
+      result.push((doc) => {
+        const blocks = doc.blocks.map((b: TemplateBlock) => {
+          if (b.kind !== "phrase") return b;
+          const pb = b as PhraseBlock;
+          
+          if (pb.phraseText !== this.selectedPhrase.text) return pb;
+          
+          const tokens = pb.tokens.map((t, i) => 
+            this.selectedWordIndices.has(i) ? { ...t, randomize: true } : t
+          );
+          return { ...pb, tokens } as PhraseBlock;
+        });
+        return { ...doc, blocks };
+      });
+    }
+
+    // POS-based randomization mutator
+    const anyPOS = Object.values(this.posRandomP).some(p => p > 0);
+    if (anyPOS) {
+      result.push((doc) => {
+        const blocks = doc.blocks.map((b: TemplateBlock) => {
+          if (b.kind !== "phrase") return b;
+          const pb = b as PhraseBlock;
+          const tokens = pb.tokens.map((t: PhraseToken) => {
+            const candidates: POS[] = t.pos ? [t.pos] : (t.posSet ?? []);
+            const maxP = candidates.reduce((m, pos) => Math.max(m, (this.posRandomP[pos as POS] ?? 0) / 100), 0);
+            if (maxP > 0 && /[A-Za-z]/.test(t.text)) {
+              if (Math.random() < maxP) return { ...t, randomize: true };
+            }
+            return t;
+          });
+          return { ...pb, tokens } as PhraseBlock;
+        });
+        return { ...doc, blocks };
+      });
+    }
+
+    // Regex-based randomization mutator
+    if (this.regexText.trim().length > 0 && this.regexRandomizeP > 0) {
+      let re: RegExp | null = null;
+      try { re = new RegExp(this.regexText, "i"); } catch { re = null; }
+      if (re) {
+        const p = Math.max(0, Math.min(100, this.regexRandomizeP)) / 100;
+        result.push((doc) => {
+          const blocks = doc.blocks.map((b: TemplateBlock) => {
+            if (b.kind !== "phrase") return b;
+            const pb = b as PhraseBlock;
+            if (!re!.test(pb.phraseText)) return pb;
+            const tokens = pb.tokens.map((t: PhraseToken) => {
+              if (/[A-Za-z]/.test(t.text) && Math.random() < p) return { ...t, randomize: true };
+              return t;
+            });
+            return { ...pb, tokens } as PhraseBlock;
+          });
+          return { ...doc, blocks };
+        });
+      }
+    }
+
+    // Cache the result and config signature
+    this.cachedMutators = result;
+    this.lastMutatorConfig = configSignature;
+
+    return result;
+  }
+
+  // ===== CONFIGURATION METHODS =====
+
+  /**
+   * Configure mutator settings
+   */
+  configureMutators(config: {
+    useJitter?: boolean;
+    jitterP?: number;
+    useAutoBind?: boolean;
+    useEnsure2?: boolean;
+    useRandNouns?: boolean;
+    useMaxRandomization?: boolean;
+    maxRandomSlots?: number;
+    usePositionBasedRandom?: boolean;
+    targetPOS?: POS;
+    targetPosition?: number;
+    useClickableSelection?: boolean;
+    selectedPhrase?: any;
+    selectedWordIndices?: Set<number>;
+    posRandomP?: Record<POS, number>;
+    regexText?: string;
+    regexRandomizeP?: number;
+  }) {
+    if (config.useJitter !== undefined) this.useJitter = config.useJitter;
+    if (config.jitterP !== undefined) this.jitterP = config.jitterP;
+    if (config.useAutoBind !== undefined) this.useAutoBind = config.useAutoBind;
+    if (config.useEnsure2 !== undefined) this.useEnsure2 = config.useEnsure2;
+    if (config.useRandNouns !== undefined) this.useRandNouns = config.useRandNouns;
+    if (config.useMaxRandomization !== undefined) this.useMaxRandomization = config.useMaxRandomization;
+    if (config.maxRandomSlots !== undefined) this.maxRandomSlots = config.maxRandomSlots;
+    if (config.usePositionBasedRandom !== undefined) this.usePositionBasedRandom = config.usePositionBasedRandom;
+    if (config.targetPOS !== undefined) this.targetPOS = config.targetPOS;
+    if (config.targetPosition !== undefined) this.targetPosition = config.targetPosition;
+    if (config.useClickableSelection !== undefined) this.useClickableSelection = config.useClickableSelection;
+    if (config.selectedPhrase !== undefined) this.selectedPhrase = config.selectedPhrase;
+    if (config.selectedWordIndices !== undefined) this.selectedWordIndices = config.selectedWordIndices;
+    if (config.posRandomP !== undefined) this.posRandomP = config.posRandomP;
+    if (config.regexText !== undefined) this.regexText = config.regexText;
+    if (config.regexRandomizeP !== undefined) this.regexRandomizeP = config.regexRandomizeP;
+    
+    // Clear cache when configuration changes
+    this.cachedMutators = null;
+    this.lastMutatorConfig = "";
+  }
+
+  // ===== ENHANCED GENERATION METHODS =====
+
+  /**
+   * Generate prompt using the enhanced Prompter system
+   */
+  async generateEnhancedPrompt(
+    activeCtx: ContextualNodeSets,
+    graph: SemanticGraphLite,
+    sessionId: string,
+    rng?: RNG,
+    lockedDoc?: TemplateDoc
+  ): Promise<{ prompt: string; templateId: string; templateText: string; debug: any }> {
+    const activeSource = this.buildActiveSource(activeCtx, lockedDoc);
+    const configurableMutators = this.buildConfigurableMutators();
+    
+    // Initialize or update the single Prompter instance
+    this.initializePrompter(activeSource as TemplateDoc[], configurableMutators, rng);
+
+    const res = await this.prompter!.generate({
+      graph,
+      ctxOverride: {
+        words: activeCtx?.words ?? [],
+        phrases: activeCtx?.phrases ?? []
+      }
+    });
+
+    return res;
+  }
+
+  /**
+   * Generate multiple ephemeral prompts using the enhanced system
+   */
+  async generateEphemeralPromptsEnhanced(
+    graph: SemanticGraphLite,
+    activeCtx: ContextualNodeSets,
+    sessionId: string,
+    count = 20,
+    seed?: number
+  ): Promise<EphemeralPrompt[]> {
+    const rng = seed ? { next: () => Math.random() } : undefined; // Simple RNG for now
+    const out: EphemeralPrompt[] = [];
+    const recentTexts = new Set<string>();
+
+    for (let i = 0; i < count; i++) {
+      try {
+        const res = await this.generateEnhancedPrompt(activeCtx, graph, sessionId, rng);
+        
+        if (recentTexts.has(res.prompt)) continue;
+        recentTexts.add(res.prompt);
+
+        out.push({
+          templateId: res.templateId,
+          templateSignature: 'ENHANCED-GENERATED',
+          text: res.prompt,
+          bindings: [], // Prompter doesn't provide detailed bindings yet
+          randomSeed: String(seed ?? 'r' + Math.floor(Math.random() * 1e9)),
+        });
+      } catch (error) {
+        console.warn('Enhanced prompt generation failed:', error);
+        continue;
+      }
+    }
+
+    return out;
   }
 }
 
@@ -510,155 +927,8 @@ async function applyMorphIfNeeded(
   }
 }
 
-// Fill a single template randomly, enforcing POS, locks first, then ctx, then bank.
-export async function fillTemplateSlotsRandom(
-  tpl: UserTemplate,
-  ctx: ContextualNodeSets,
-  locks: SessionLocks,
-  rng: () => number
-): Promise<{ text: string; bindings: EphemeralPrompt['bindings']; templateSignature: string } | null> {
-  const bindings: EphemeralPrompt['bindings'] = [];
-  const renderedTokens: string[] = [];
 
-  // Index ctx words by POS
-  const wordsByPOS = new Map<POS, any[]>();
-  const POS_ALL: POS[] = ['NOUN','VERB','VERB:participle','VERB:past','VERB:present_3rd','ADJ','ADJ:comparative','ADJ:superlative','ADV','ADP','DET','PRON','PROPN','AUX','CCONJ'];
-  POS_ALL.forEach(pos => wordsByPOS.set(pos, ctx.words.filter(w => w.pos?.includes(pos))));
-  
-  const pick = <T,>(arr: T[]) => (arr.length ? arr[Math.floor(rng() * arr.length)] : undefined);
-
-  // Only memoize explicitly numbered slots
-  const chosenByKey = new Map<string, { nodeId?: string; bank?: string }>();
-
-  // Get base words if this template came from a phrase
-  const baseWords = tpl.baseText ? tokenizeBaseText(tpl.baseText) : [];
-  let baseWordIndex = 0;
-
-  // Build prompt left to right, one word at a time
-  for (let i = 0; i < tpl.slots.length; i++) {
-    const slot = tpl.slots[i];
-    
-    if (slot.kind === 'chunk') {
-      // Handle chunk slots
-      const locked = new Set(locks.lockedChunkIds ?? []);
-      const candidates = ctx.chunks.filter(c => c.posPattern === slot.chunkPattern);
-      const lockedFirst = candidates.filter(c => locked.has(c.id)).concat(candidates.filter(c => !locked.has(c.id)));
-      const chosen = pick(lockedFirst);
-
-      if (!chosen) return null;
-      bindings.push({ slot, nodeId: chosen.id });
-      renderedTokens.push(chosen.text);
-      continue;
-    }
-
-    // Handle word slots
-    const key = slot.index !== undefined ? `${slot.pos}:${slot.index}` : null;
-    
-    // Check if we already chose this numbered slot
-    if (key && chosenByKey.has(key)) {
-      const chosen = chosenByKey.get(key)!;
-      bindings.push({ slot, ...chosen });
-      
-      // Render the previously chosen word
-      if (chosen.nodeId) {
-        const w = ctx.words.find(x => x.id === chosen.nodeId);
-        if (w) {
-          const { morph } = parseMorphSpecifier(slot.pos);
-          const surface = w.lemma || w.text;
-          if (morph) {
-            const rendered = await applyMorphIfNeeded(surface, w.lemma, slot.pos, morph);
-            renderedTokens.push(rendered);
-          } else {
-            renderedTokens.push(surface);
-          }
-        } else {
-          renderedTokens.push('');
-        }
-      } else {
-        renderedTokens.push(chosen.bank ?? '');
-      }
-      continue;
-    }
-
-    // For unnumbered slots with baseText, use the original phrase word
-    // For numbered slots or slots without baseText, randomize
-    let chosenWord: any = null;
-    let chosenBank: string | undefined = undefined;
-
-    if (slot.index == null && tpl.baseText && baseWordIndex < baseWords.length) {
-      // Use original phrase word for unnumbered slots
-      const baseWord = baseWords[baseWordIndex];
-      baseWordIndex++;
-      
-      // Find a word in context that matches this base word and POS
-      const { basePos } = parseMorphSpecifier(slot.pos);
-      chosenWord = ctx.words.find(w => 
-        w.text.toLowerCase() === baseWord.toLowerCase() && 
-        w.pos?.includes(basePos)
-      );
-      
-      // If no exact match, use the base word as-is (will be added to word bank)
-      if (!chosenWord) {
-        chosenBank = baseWord;
-      }
-    } else {
-      // Randomize from context/word bank
-      const lockedSet = new Set(locks.lockedWordIds ?? []);
-      const { basePos } = parseMorphSpecifier(slot.pos);
-      
-      // 1) Try locked words first
-      const lockedPool = wordsByPOS.get(basePos as POS)?.filter(w => lockedSet.has(w.id)) || [];
-      chosenWord = pick(lockedPool);
-
-      // 2) Try context words
-      if (!chosenWord) {
-        const candidates = ctx.words.filter(w => w.pos?.includes(basePos));
-        chosenWord = pick(candidates);
-      }
-
-      // 3) Fall back to word bank
-      if (!chosenWord) {
-        const bank = (wordBank[basePos as POS] ?? []);
-        chosenBank = pick(bank);
-        if (!chosenBank) return null;
-      }
-    }
-
-    // Store the choice for numbered slots
-    if (key) {
-      const chosen = chosenWord ? { nodeId: chosenWord.id } : { bank: chosenBank };
-      chosenByKey.set(key, chosen);
-    }
-
-    // Add to bindings
-    if (chosenWord) {
-      bindings.push({ slot, nodeId: chosenWord.id });
-    } else {
-      bindings.push({ slot, bank: chosenBank });
-    }
-
-    // Render the word
-    if (chosenWord) {
-      const { morph } = parseMorphSpecifier(slot.pos);
-      const surface = chosenWord.lemma || chosenWord.text;
-      if (morph) {
-        const rendered = await applyMorphIfNeeded(surface, chosenWord.lemma, slot.pos, morph);
-        renderedTokens.push(rendered);
-      } else {
-        renderedTokens.push(surface);
-      }
-    } else {
-      renderedTokens.push(chosenBank ?? '');
-    }
-  }
-
-  const finalText = renderedTokens.join(' ').trim();
-  const rendered = finalText ? finalText[0].toUpperCase() + finalText.slice(1) : '';
-  const signature = tpl.slots.map(s => s.kind === 'chunk' ? (s.chunkPattern ?? '') : `${s.pos}${s.index ?? ''}`).join('-');
-  return { text: rendered, bindings, templateSignature: signature };
-}
-
-// Generate multiple ephemeral prompts (no storage). Respects locked templates first.
+// Generate multiple ephemeral prompts (no storage). Now uses enhanced system by default.
 export async function generateEphemeralPrompts(
   graph: any, // keep generic to avoid tight coupling here
   ctx: ContextualNodeSets,
@@ -666,63 +936,10 @@ export async function generateEphemeralPrompts(
   count = 20,
   seed?: number
 ): Promise<EphemeralPrompt[]> {
-  const rng = mulberry32(seed ?? Math.floor(Math.random() * 1e9));
-  const templates = getAvailableTemplates(ctx, sessionId);
-  const locks = getSessionLocks(graph, sessionId);
-
-  // prioritize pinned or explicitly locked templates
-  const hardTplIds = new Set([...(locks.lockedTemplateIds ?? [])]);
-  const hard = templates.filter(t => hardTplIds.has(t.id) || t.pinned);
-  const soft = templates.filter(t => !hardTplIds.has(t.id) && !t.pinned);
-  const ordered = hard.concat(soft);
-
-  const recentTexts = new Set<string>();
-  const out: EphemeralPrompt[] = [];
-
-  for (let i = 0; i < count; i++) {
-    const tpl = ordered[Math.floor(rng() * ordered.length)];
-    if (!tpl) break;
-
-    // Convert to new unified template format if needed
-    const unifiedTpl: UnifiedTemplate = tpl as UnifiedTemplate;
-    const lockedSet = new Set([...(locks.lockedWordIds ?? [])]);
-    
-    const filled = await realizeTemplate({ 
-      tpl: unifiedTpl, 
-      ctx, 
-      lockedSet, 
-      wordBank: wordBank 
-    });
-    
-    if (!filled || !filled.surface) { continue; }
-
-    // basic dedupe: avoid identical text within this burst
-    if (recentTexts.has(filled.surface)) { continue; }
-    recentTexts.add(filled.surface);
-
-    // Create bindings array for compatibility
-    const bindings: EphemeralPrompt['bindings'] = [];
-    const signature = unifiedTpl.tokens.map(t => 
-      t.kind === 'slot' ? `${t.pos}${t.bindId || ''}` : 
-      t.kind === 'subtemplate' ? 'CHUNK' : 'LITERAL'
-    ).join('-');
-
-    out.push({
-      templateId: tpl.id,
-      templateSignature: signature,
-      text: filled.surface,
-      bindings,
-      randomSeed: String(seed ?? 'r' + Math.floor(Math.random() * 1e9)),
-    });
-  }
-
-  return out;
+  // Use the enhanced system by default
+  return await promptEngine.generateEphemeralPromptsEnhanced(graph, ctx, sessionId, count, seed);
 }
 
-// REPLACE any usage of fillTemplateSlotsRandom with realizeTemplate
-export async function realizeOne(tpl: UnifiedTemplate, ctx: any, lockedSet: Set<string>, wordBank: Record<string, string[]>) {
-  return realizeTemplate({ tpl, ctx, lockedSet, wordBank });
-}
 
 /**
  * 🚫 If anyone adds a new export here that calls realizeTemplate directly,

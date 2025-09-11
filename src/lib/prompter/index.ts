@@ -183,6 +183,23 @@ export class Prompter {
     this.rng = cfg.rng ?? new DefaultRNG();
   }
 
+  /**
+   * Update the Prompter configuration without recreating the instance
+   */
+  updateConfig(newCfg: Partial<PrompterConfig>): void {
+    this.cfg = { ...this.cfg, ...newCfg };
+    if (newCfg.rng) {
+      this.rng = newCfg.rng;
+    }
+  }
+
+  /**
+   * Get current configuration (for debugging/inspection)
+   */
+  getConfig(): PrompterConfig {
+    return { ...this.cfg };
+  }
+
   // NOTE: Binds are *per prompt*, not persisted across runs. The Composer's
   // realizeTemplate already creates a fresh binds map on each call. We rely on that.
 

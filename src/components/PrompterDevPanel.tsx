@@ -5,6 +5,7 @@ import type { SemanticGraphLite } from "../lib/semanticGraphLite.js";
 import { Prompter, mutatorAutoBind, mutatorEnsure2Random, mutatorRandomizeNouns, type TemplateSource, type TemplateMutator } from "../lib/prompter/index.js";
 import { parseTextPatternsToUTA } from "./ComposerEditor";
 import { useActiveNodesWithGraph } from "../contexts/ActiveNodesContext";
+import { promptEngine } from "../lib/promptEngine.js";
 import { 
   listSessionProfiles, 
   addSessionProfile, 
@@ -641,21 +642,15 @@ export default function PrompterDevPanel({ source, graph, bank, className }: Pro
         }
       }
 
-      const prompter = new Prompter({
-        // If toggled on, drive from ACTIVE POOL; else use panel's provided source
-        source: useActivePool ? activeSource : (lockedDoc ? [lockedDoc] : source),
-        rng: rng as any,
-        mutators: configurableMutators,
-      });
-      // Pass ACTIVE POOL as ctxOverride so selection matches Composer's current context
-      const res = await prompter.generate({
+      // Use the enhanced PromptEngine instead of creating a new Prompter instance
+      const res = await promptEngine.generateEnhancedPrompt(
+        activeCtx || { words: [], chunks: [], phrases: [] },
         graph,
-        bank,
-        ctxOverride: {
-          words: activeCtx?.words ?? [],
-          phrases: activeCtx?.phrases ?? []
-        }
-      });
+        sessionId,
+        rng,
+        useActivePool ? undefined : (lockedDoc || undefined)
+      );
+      
       setPrompt(res.prompt);
       setDebug(res.debug);
       setChosenTemplateId(res.templateId);

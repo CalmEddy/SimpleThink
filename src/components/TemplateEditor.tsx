@@ -2,7 +2,8 @@ import { useMemo, useState, useEffect, useRef } from 'react';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext';
 import { SlotDescriptor, POS } from '../types/index.js';
 import { addSessionTemplate, updateSessionTemplate, removeSessionTemplate, listSessionTemplates } from '../lib/sessionTemplates.js';
-import { createTemplateFromText, fillTemplateSlotsRandom } from '../lib/promptEngine.js';
+import { createTemplateFromText } from '../lib/promptEngine.js';
+import { realizeTemplate } from '../lib/fillTemplate.js';
 import type { SemanticGraphLite } from '../lib/semanticGraphLite.js';
 import ComposerEditor from './ComposerEditor';
 
@@ -149,11 +150,16 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
       console.log('🔍 originalPhraseText in testTemplate:', originalPhraseText);
       const template = createTemplateFromText(templateText, sessionId, originalPhraseText ?? undefined);
       
-      // Use centralized fillTemplateSlotsRandom for testing
-      const result = await fillTemplateSlotsRandom(template, ctx, { lockedWordIds: [], lockedChunkIds: [], lockedTemplateIds: [] }, Math.random);
+      // Use realizeTemplate directly for testing
+      const result = await realizeTemplate({
+        tpl: template,
+        ctx: { words: ctx.words, phrases: ctx.phrases },
+        lockedSet: new Set(),
+        wordBank: {}
+      });
       
       if (result) {
-        const finalText = result.text;
+        const finalText = result.surface;
         console.log('✅ Generated prompt:', finalText);
         console.log('🔍 Setting testPrompt to:', finalText);
         

@@ -69,9 +69,6 @@ export const wordBank: Record<POS, string[]> = {
 
 export default wordBank;
 
-// Legacy export for backward compatibility
-export const WORD_BANK = wordBank;
-
 export function getTemplateById(id: string): Template | undefined {
   return TEMPLATES.find(template => template.id === id);
 }

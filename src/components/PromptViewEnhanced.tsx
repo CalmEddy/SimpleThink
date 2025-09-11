@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { SemanticGraphLite } from '../lib/semanticGraphLite.js';
 import { recordResponse, promoteResponseToPhrase, rateResponse } from '../lib/respond.js';
-import { generateEphemeralPrompts } from '../lib/promptEngine.js';
+import { generateEphemeralPrompts } from '../lib/promptEngineBridge.js';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext.js';
 import type { PromptNode, ResponseNode, EphemeralPrompt } from '../types/index.js';
 

@@ -45,11 +45,6 @@ function DevPanelWrapper({ graph, onGraphUpdate, onError }: {
     <PrompterDevPanel 
       source={templateSource}
       graph={graph}
-      bank={{
-        ADJ: ['zesty', 'curious', 'bright', 'mysterious'],
-        NOUN: ['idea', 'concept', 'thought', 'notion'],
-        VERB: ['explore', 'discover', 'create', 'imagine']
-      }}
     />
   );
 }

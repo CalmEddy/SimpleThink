@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SemanticGraphLite } from '../semanticGraphLite.js';
-import { fillTemplateSlotsRandom } from '../promptEngine.js';
+import { realizeTemplate } from '../fillTemplate.js';
 import type { ContextualNodeSets, SessionLocks } from '../../types/index.js';
 
 describe('Tense-Aware Templates', () => {
@@ -10,7 +10,7 @@ describe('Tense-Aware Templates', () => {
     graph = new SemanticGraphLite();
   });
 
-  it('should demonstrate morphological template matching', () => {
+  it('should demonstrate morphological template matching', async () => {
     // Create a mock context with words that have morphological features
     const mockContext: ContextualNodeSets = {
       words: [
@@ -113,17 +113,47 @@ describe('Tense-Aware Templates', () => {
     const mockRng = () => 0;
 
     // Test participle template
-    const participleResult = fillTemplateSlotsRandom(participleTemplate, mockContext, mockLocks, mockRng);
+    const participleUnifiedTemplate = {
+      id: participleTemplate.id,
+      text: participleTemplate.text,
+      createdInSessionId: participleTemplate.createdInSessionId,
+      tokens: participleTemplate.slots.map(slot => ({
+        kind: 'slot' as const,
+        pos: slot.pos as any,
+        index: undefined
+      }))
+    };
+    const participleResult = await realizeTemplate({
+      tpl: participleUnifiedTemplate,
+      ctx: { words: mockContext.words },
+      lockedSet: new Set(),
+      wordBank: {}
+    });
     expect(participleResult).toBeDefined();
-    expect(participleResult?.text).toBe('Cat eating mouse');
+    expect(participleResult?.surface).toBe('Cat eating mouse');
 
     // Test past tense template
-    const pastResult = fillTemplateSlotsRandom(pastTemplate, mockContext, mockLocks, mockRng);
+    const pastUnifiedTemplate = {
+      id: pastTemplate.id,
+      text: pastTemplate.text,
+      createdInSessionId: pastTemplate.createdInSessionId,
+      tokens: pastTemplate.slots.map(slot => ({
+        kind: 'slot' as const,
+        pos: slot.pos as any,
+        index: undefined
+      }))
+    };
+    const pastResult = await realizeTemplate({
+      tpl: pastUnifiedTemplate,
+      ctx: { words: mockContext.words },
+      lockedSet: new Set(),
+      wordBank: {}
+    });
     expect(pastResult).toBeDefined();
-    expect(pastResult?.text).toBe('Cat ate mouse');
+    expect(pastResult?.surface).toBe('Cat ate mouse');
   });
 
-  it('should demonstrate adjective morphological matching', () => {
+  it('should demonstrate adjective morphological matching', async () => {
     const mockContext: ContextualNodeSets = {
       words: [
         {
@@ -222,13 +252,43 @@ describe('Tense-Aware Templates', () => {
     const mockRng = () => 0;
 
     // Test comparative template
-    const comparativeResult = fillTemplateSlotsRandom(comparativeTemplate, mockContext, mockLocks, mockRng);
+    const comparativeUnifiedTemplate = {
+      id: comparativeTemplate.id,
+      text: comparativeTemplate.text,
+      createdInSessionId: comparativeTemplate.createdInSessionId,
+      tokens: comparativeTemplate.slots.map(slot => ({
+        kind: 'slot' as const,
+        pos: slot.pos as any,
+        index: undefined
+      }))
+    };
+    const comparativeResult = await realizeTemplate({
+      tpl: comparativeUnifiedTemplate,
+      ctx: { words: mockContext.words },
+      lockedSet: new Set(),
+      wordBank: {}
+    });
     expect(comparativeResult).toBeDefined();
-    expect(comparativeResult?.text).toBe('Bigger cat');
+    expect(comparativeResult?.surface).toBe('Bigger cat');
 
     // Test superlative template
-    const superlativeResult = fillTemplateSlotsRandom(superlativeTemplate, mockContext, mockLocks, mockRng);
+    const superlativeUnifiedTemplate = {
+      id: superlativeTemplate.id,
+      text: superlativeTemplate.text,
+      createdInSessionId: superlativeTemplate.createdInSessionId,
+      tokens: superlativeTemplate.slots.map(slot => ({
+        kind: 'slot' as const,
+        pos: slot.pos as any,
+        index: undefined
+      }))
+    };
+    const superlativeResult = await realizeTemplate({
+      tpl: superlativeUnifiedTemplate,
+      ctx: { words: mockContext.words },
+      lockedSet: new Set(),
+      wordBank: {}
+    });
     expect(superlativeResult).toBeDefined();
-    expect(superlativeResult?.text).toBe('Biggest cat');
+    expect(superlativeResult?.surface).toBe('Biggest cat');
   });
 });
