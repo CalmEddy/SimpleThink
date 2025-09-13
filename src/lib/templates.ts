@@ -73,12 +73,18 @@ export function getTemplateById(id: string): Template | undefined {
   return TEMPLATES.find(template => template.id === id);
 }
 
-export function getRandomWordForSlot(slot: string): string {
+export async function getRandomWordForSlot(slot: string): Promise<string> {
   const words = wordBank[slot as POS];
   if (!words || words.length === 0) {
     return slot.toLowerCase(); // Fallback to slot name
   }
-  return words[Math.floor(Math.random() * words.length)];
+  
+  // Use unified randomization service
+  const { RandomizationConfigManager } = await import('./randomization/index.js');
+  const configManager = RandomizationConfigManager.getInstance();
+  const randomizationService = await configManager.createService();
+  
+  return randomizationService.pickFromArray(words) || words[0];
 }
 
 export function getWordsForSlot(slot: string): string[] {

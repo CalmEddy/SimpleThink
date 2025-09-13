@@ -3,6 +3,7 @@ import type { SemanticGraphLite } from './semanticGraphLite';
 import { wordBank } from './templates'; // fallback bank
 import { TenseConverter } from './tenseConverter';
 import { realizeTemplate } from './fillTemplate';
+import { RandomizationConfigManager } from './randomization/index.js';
 
 export interface GenerateOptions {
   graph: SemanticGraphLite;
@@ -56,7 +57,7 @@ export function generateFromDoc(doc: TemplateDoc, opts: GenerateOptions): string
     let lemma = linked?.lemma;
     let posForLemma = linked?.pos ?? basePOS;
     if (!lemma) {
-      const candidate = chooseFromBank(basePOS);
+      const candidate = await chooseFromBank(basePOS);
       lemma = candidate.toLowerCase(); // simple lemma heuristic
       posForLemma = basePOS;
       if (tok.slotLabel) labelLemma.set(tok.slotLabel, { lemma, pos: posForLemma });
@@ -230,7 +231,7 @@ export async function generateFromDocAsyncLegacy(
     let lemma = linked?.lemma;
     let posForLemma = linked?.pos ?? basePOS;
     if (!lemma) {
-      const candidate = chooseFromBank(basePOS);
+      const candidate = await chooseFromBank(basePOS);
       lemma = lemmaHeuristic(candidate);
       posForLemma = basePOS;
       if (tok.slotLabel) labelLemma.set(tok.slotLabel, { lemma, pos: posForLemma });
@@ -421,15 +422,18 @@ function morphFromPOSVariant(pos?: POS): MorphFeature | null {
   return null;
 }
 
-function chooseFromBank(pos: ReturnType<typeof basePOSOf>): string {
+async function chooseFromBank(pos: ReturnType<typeof basePOSOf>): Promise<string> {
+  const configManager = RandomizationConfigManager.getInstance();
+  const randomizationService = await configManager.createService();
+  
   const bank = (wordBank as any)?.[pos];
   if (Array.isArray(bank) && bank.length) {
-    return String(bank[Math.floor(Math.random() * bank.length)]);
+    return String(randomizationService.pickFromArray(bank) || bank[0]);
   }
   // Use main wordBank as fallback (it should always have words)
   const fallback = (wordBank as any)?.[pos] || (wordBank as any)?.['NOUN'];
   if (Array.isArray(fallback) && fallback.length) {
-    return String(fallback[Math.floor(Math.random() * fallback.length)]);
+    return String(randomizationService.pickFromArray(fallback) || fallback[0]);
   }
   // Ultimate fallback to slot name
   return pos.toLowerCase();

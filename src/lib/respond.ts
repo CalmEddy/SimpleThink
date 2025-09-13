@@ -5,6 +5,7 @@ import { promoteChunk } from './ingest.js';
 import { generatePosPattern, processPropnSpans } from './posNormalization.js';
 import { isStopWord } from './stopWords.js';
 import { analyzeWordPOS } from './posAnalysis.js';
+import { IngestionPipeline } from './ingest.js';
 
 export interface ResponseResult {
   responseNode: ResponseNode;
@@ -28,6 +29,24 @@ export class ResponseEngine {
   }
 
   async recordResponse(
+    promptId: string,
+    text: string,
+    graph: SemanticGraphLite,
+    rating?: 'like' | 'skip',
+    usePhraseSplitting?: boolean
+  ): Promise<ResponseResult> {
+    // If phrase splitting is enabled, use the new method
+    if (usePhraseSplitting) {
+      const results = await this.recordResponseWithPhraseSplitting(promptId, text, graph, rating);
+      // Return the first result for backward compatibility
+      return results[0];
+    }
+
+    // Original single response processing
+    return this.processSingleResponse(promptId, text, graph, rating);
+  }
+
+  private async processSingleResponse(
     promptId: string,
     text: string,
     graph: SemanticGraphLite,
@@ -242,6 +261,41 @@ export class ResponseEngine {
     return posMap[pos] || 'X';
   }
 
+  // New method for phrase-splitting response storage
+  async recordResponseWithPhraseSplitting(
+    promptId: string,
+    text: string,
+    graph: SemanticGraphLite,
+    rating?: 'like' | 'skip'
+  ): Promise<ResponseResult[]> {
+    // Use existing IngestionPipeline to split text into phrases
+    const ingestionPipeline = IngestionPipeline.getInstance();
+    const phrases = ingestionPipeline.splitTextIntoPhrases(text);
+    
+    if (phrases.length === 0) {
+      throw new Error('No phrases found in response text');
+    }
+
+    // Process each phrase as a separate response
+    const results: ResponseResult[] = [];
+    
+    for (const phrase of phrases) {
+      try {
+        const result = await this.processSingleResponse(promptId, phrase, graph, rating);
+        results.push(result);
+      } catch (error) {
+        // Log error but continue with other phrases
+        console.warn(`Failed to process phrase "${phrase}":`, error);
+      }
+    }
+
+    if (results.length === 0) {
+      throw new Error('Failed to process any phrases from response text');
+    }
+
+    return results;
+  }
+
   // Get responses for a prompt
   getResponsesForPrompt(promptId: string, graph: SemanticGraphLite): ResponseNode[] {
     return graph.getNodesByType('RESPONSE')
@@ -281,8 +335,9 @@ export const recordResponse = async (
   promptId: string,
   text: string,
   graph: SemanticGraphLite,
-  rating?: 'like' | 'skip'
-) => responseEngine.recordResponse(promptId, text, graph, rating);
+  rating?: 'like' | 'skip',
+  usePhraseSplitting?: boolean
+) => responseEngine.recordResponse(promptId, text, graph, rating, usePhraseSplitting);
 
 export const promoteResponseToPhrase = (
   responseId: string,
@@ -294,3 +349,29 @@ export const rateResponse = (
   rating: 'like' | 'skip',
   graph: SemanticGraphLite
 ) => responseEngine.rateResponse(responseId, rating, graph);
+
+// New reassembly utilities
+export const reassembleCompleteResponse = (
+  promptId: string,
+  graph: SemanticGraphLite
+): string => {
+  // Get all responses for the prompt using existing method
+  const responses = responseEngine.getResponsesForPrompt(promptId, graph);
+  
+  if (responses.length === 0) {
+    return '';
+  }
+  
+  // Sort responses by creation timestamp to maintain order
+  const sortedResponses = responses.sort((a, b) => a.createdAt - b.createdAt);
+  
+  // Join all response texts with spaces
+  return sortedResponses.map(response => response.text).join(' ');
+};
+
+export const getResponsesForPrompt = (
+  promptId: string,
+  graph: SemanticGraphLite
+): ResponseNode[] => {
+  return responseEngine.getResponsesForPrompt(promptId, graph);
+};

@@ -8,7 +8,7 @@ import PrompterDevPanel from './components/PrompterDevPanel.tsx';
 import { ActiveNodesProvider } from './contexts/ActiveNodesContext.jsx';
 import { getAvailableTemplates } from './lib/promptEngine.js';
 import { useActiveNodesWithGraph } from './contexts/ActiveNodesContext.js';
-import { loadAllTemplatesFromStorage } from './lib/userTemplates.js';
+import { initializeTemplateStore } from './lib/templateStore/init.js';
 import type { TemplateDoc } from './types/index.js';
 
 type ViewType = 'ingest' | 'explore' | 'prompt' | 'dev';
@@ -69,8 +69,15 @@ function App() {
       // Initialize persistence
       await persistenceManager.initialize();
 
-      // Load all user templates from localStorage
-      loadAllTemplatesFromStorage();
+      // Initialize One True Store (migrates legacy templates and sets up new storage)
+      await initializeTemplateStore();
+
+      // Trigger initial template loading for any existing sessions
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('prompter:templates-changed', { 
+          detail: { sessionId: '__global__' } 
+        }));
+      }
 
       // Load existing graph
       const savedGraph = await persistenceManager.loadGraph();

@@ -86,6 +86,14 @@ export const ActiveNodesProvider: React.FC<ActiveNodesProviderProps> = ({ childr
         entityBindings: {},
         startedAt: Date.now(),
       });
+
+      // Notify all components that templates should be refreshed for this new session
+      // This ensures user templates are automatically loaded when a topic is created
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('prompter:templates-changed', { 
+          detail: { sessionId: session.id } 
+        }));
+      }
     } catch (error) {
       console.error('Failed to start topic session:', error);
     }
@@ -162,14 +170,6 @@ export const ActiveNodesProvider: React.FC<ActiveNodesProviderProps> = ({ childr
       };
     }
 
-    // Extract words from contextual phrases
-    const wordIds = new Set<string>();
-    phrases.forEach(phrase => {
-      phrase.wordIds.forEach(wordId => wordIds.add(wordId));
-    });
-    const allWords = graph.getNodesByType('WORD') as WordNode[];
-    const words = allWords.filter(word => wordIds.has(word.id));
-
     // Extract chunks from contextual phrases (ensure uniqueness by ID)
     const chunks: PhraseChunk[] = [];
     const chunkIds = new Set<string>();
@@ -199,6 +199,24 @@ export const ActiveNodesProvider: React.FC<ActiveNodesProviderProps> = ({ childr
     const promptIds = new Set(prompts.map(p => p.id));
     const allResponses = graph.getNodesByType('RESPONSE') as ResponseNode[];
     const responses = allResponses.filter(response => promptIds.has(response.promptId));
+
+    // Extract words from BOTH contextual phrases AND responses
+    const wordIds = new Set<string>();
+    
+    // Add words from phrases
+    phrases.forEach(phrase => {
+      phrase.wordIds.forEach(wordId => wordIds.add(wordId));
+    });
+    
+    // Add words from responses
+    responses.forEach(response => {
+      if (response.wordIds) {
+        response.wordIds.forEach(wordId => wordIds.add(wordId));
+      }
+    });
+    
+    const allWords = graph.getNodesByType('WORD') as WordNode[];
+    const words = allWords.filter(word => wordIds.has(word.id));
 
     // Convert entity bindings to array format
     const entities = Object.entries(contextFrame.entityBindings).map(([key, binding]) => ({

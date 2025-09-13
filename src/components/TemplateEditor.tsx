@@ -1,11 +1,30 @@
 import { useMemo, useState, useEffect, useRef } from 'react';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext';
 import { SlotDescriptor, POS } from '../types/index.js';
-import { addSessionTemplate, updateSessionTemplate, removeSessionTemplate, listSessionTemplates, saveAllTemplates, loadTemplatesFromFile } from '../lib/userTemplates.js';
-import { createTemplateFromText } from '../lib/promptEngine.js';
-import { realizeTemplate } from '../lib/fillTemplate.js';
+import { TemplateStore } from '../lib/templateStore';
+import { ensureHydrated } from '../lib/ensureHydrated';
+// import { saveTemplateRobust } from '../lib/templateSaving'; // Not used anymore
+import { convertTemplateDocToUnified } from '../lib/composer';
+import { realizeTemplate } from '../lib/fillTemplate';
+import type { TemplateDoc } from '../types';
 import type { SemanticGraphLite } from '../lib/semanticGraphLite.js';
 import ComposerEditor from './ComposerEditor';
+
+// const docToPattern = (doc: TemplateDoc) => {
+//   const parts: string[] = [];
+//   for (const b of doc.blocks || []) {
+//     if ((b as any).kind === 'phrase') {
+//       for (const t of (b as any).tokens || []) {
+//         if (t.randomize && t.pos) parts.push(`[${t.pos}]`);
+//         else if (t.text) parts.push(t.text);
+//       }
+//     } else if ((b as any).kind === 'text') {
+//       const txt = (b as any).text || '';
+//       if (txt.trim()) parts.push(txt);
+//     }
+//   }
+//   return parts.join(' ').replace(/\s+/g, ' ').trim();
+// };
 
 type Props = { sessionId: string; onClose?: () => void; graph: SemanticGraphLite };
 
@@ -26,6 +45,8 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
   const [showTextInput, setShowTextInput] = useState<boolean>(false);
   const [originalPhraseText, setOriginalPhraseText] = useState<string | null>(null);
   const [isSettingFromUseButton, setIsSettingFromUseButton] = useState<boolean>(false);
+
+  const lastPreviewDocRef = useRef<TemplateDoc | null>(null);
   
   // Stable ref to the test prompt box so we can ensure visibility
   const testPromptRef = useRef<HTMLDivElement | null>(null);
@@ -46,7 +67,49 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     });
   }, [tokens]);
 
-  const sessionTemplates = listSessionTemplates(sessionId);
+  const effectiveSessionId = sessionId || '__global__';
+  const [userTemplates, setUserTemplates] = useState<Array<{id:string,text:string,tags?:string[],pinned?:boolean}>>([]);
+
+  const refreshUserTemplates = async () => {
+    try {
+      const list = await TemplateStore.list(effectiveSessionId, { includeGlobal: true });
+      setUserTemplates(list.map(t => ({ 
+        id: t.id, 
+        text: t.displayText, 
+        tags: ['user'], 
+        pinned: false 
+      })));
+    } catch {
+      setUserTemplates([]);
+    }
+  };
+
+  // initial + on session change
+  useEffect(() => {
+    refreshUserTemplates();
+  }, [effectiveSessionId]);
+
+  // listen for store changes & cross-tab updates
+  useEffect(() => {
+    const onChange = (e:any) => {
+      if (!e?.detail || !e.detail.sessionId || e.detail.sessionId === effectiveSessionId) {
+        refreshUserTemplates();
+      }
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'OTS_TEMPLATES') refreshUserTemplates();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('prompter:templates-changed', onChange);
+      window.addEventListener('storage', onStorage);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('prompter:templates-changed', onChange);
+        window.removeEventListener('storage', onStorage);
+      }
+    };
+  }, [effectiveSessionId]);
 
   // Debug: Track testPrompt changes
   useEffect(() => {
@@ -86,7 +149,7 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     const newTokens: SlotDescriptor[] = [...tokens, { kind: 'slot', pos }];
     setTokens(newTokens);
     if (showTextInput) {
-      const text = '[' + newTokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+      const text = tokensToPatternString(newTokens);
       setTextInput(text);
     }
   }
@@ -100,7 +163,7 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     const newTokens: SlotDescriptor[] = [...tokens, { kind: 'chunk', pos: 'NOUN', chunkPattern: pattern }];
     setTokens(newTokens);
     if (showTextInput) {
-      const text = '[' + newTokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+      const text = tokensToPatternString(newTokens);
       setTextInput(text);
     }
   }
@@ -108,7 +171,7 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     const newTokens = tokens.filter((_, i) => i !== idx);
     setTokens(newTokens);
     if (showTextInput) {
-      const text = '[' + newTokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+      const text = tokensToPatternString(newTokens);
       setTextInput(text);
     }
   }
@@ -117,17 +180,37 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     setTextInput('');
     setOriginalPhraseText(null);
   }
-  function save() {
-    const text = '[' + tokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
+  async function save() {
     try {
-      const template = createTemplateFromText(text, sessionId, originalPhraseText || undefined);
-      addSessionTemplate(sessionId, { ...template, pinned, tags: ['user'] });
+      // Prefer the last hydrated preview; fallback to current text
+      let hydrated = lastPreviewDocRef.current;
+      if (!hydrated) {
+        const pattern = showTextInput ? (textInput || '').trim() : tokensToPatternString(tokens);
+        if (!pattern) throw new Error('Empty template (no tokens/no text)');
+        const rawDoc: TemplateDoc = {
+          id: `user_tpl_${Date.now()}`,
+          createdInSessionId: 'user-templates',
+          blocks: [{ kind: 'text', text: pattern }]
+        } as any;
+        hydrated = await ensureHydrated(rawDoc);
+      }
+      
+      console.log('[TemplateEditor] SAVE (hydrated preview) attempt', { 
+        sid: effectiveSessionId, 
+        blocks: hydrated.blocks.length
+      });
+      
+      const rec = await TemplateStore.save({
+        sessionId: effectiveSessionId,
+        doc: hydrated
+      });
+      
+      console.log('[TemplateEditor] SAVE ok', rec);
       clearAll(); setPinned(false);
+      refreshUserTemplates();
     } catch (error) {
-      console.log('🔍 Error creating template for save:', error);
-      // Fallback to direct creation if parsing fails
-      addSessionTemplate(sessionId, { text, slots: tokens, baseText: originalPhraseText || undefined, pinned, tags: ['user'] });
-      clearAll(); setPinned(false);
+      console.error('Failed to save template:', error);
+      alert(`Failed to save: ${(error as Error).message}`);
     }
   }
 
@@ -143,17 +226,18 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
     }
 
     try {
-      // Create a template from the current text input or tokens
-      const templateText = showTextInput ? textInput : '[' + tokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
-      
-      // Create template with base text if available
-      console.log('🔍 originalPhraseText in testTemplate:', originalPhraseText);
-      const template = createTemplateFromText(templateText, sessionId, originalPhraseText ?? undefined);
-      
-      // Use realizeTemplate directly for testing
+      const templateText = showTextInput ? (textInput || '') : tokensToPatternString(tokens);
+      const rawDoc: TemplateDoc = {
+        id: `test_tpl_${Date.now()}`,
+        createdInSessionId: effectiveSessionId,
+        blocks: [{ kind: 'text', text: templateText }]
+      } as any;
+      const hydrated = await ensureHydrated(rawDoc);
+      lastPreviewDocRef.current = hydrated; // <-- capture hydrated doc used for preview
+      const unified = convertTemplateDocToUnified(hydrated);
       const result = await realizeTemplate({
-        tpl: template,
-        ctx: { words: ctx.words, phrases: ctx.phrases },
+        tpl: unified,
+        ctx: { words: ctx.words },
         lockedSet: new Set(),
         wordBank: {}
       });
@@ -180,7 +264,7 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
 
 
   // Handle text input change
-  function handleTextInputChange(value: string) {
+  async function handleTextInputChange(value: string) {
     console.log('🔍 handleTextInputChange called with value:', value);
     console.log('🔍 isSettingFromUseButton:', isSettingFromUseButton);
     setTextInput(value);
@@ -192,11 +276,25 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
       // Reset the flag after handling the Use button case
       setIsSettingFromUseButton(false);
     }
+    // Parse current text into slot tokens via hydrator → phrase tokens
     try {
-      const template = createTemplateFromText(value, sessionId);
-      console.log('🔍 Parsed template from text input:', template);
-      setTokens(template.slots);
-      console.log('🔍 Tokens state updated to:', template.slots);
+      const doc: TemplateDoc = {
+        id: 'tmp_parse',
+        createdInSessionId: effectiveSessionId,
+        blocks: [{ kind: 'text', text: value }]
+      } as any;
+      const hydrated = await ensureHydrated(doc);
+      const slots: SlotDescriptor[] = [];
+      for (const b of hydrated.blocks) {
+        if ((b as any).kind === 'phrase') {
+          for (const t of (b as any).tokens || []) {
+            if (t.randomize && t.pos) {
+              slots.push({ kind: 'slot', pos: t.pos as POS });
+            }
+          }
+        }
+      }
+      setTokens(slots);
     } catch (error) {
       console.log('🔍 Error parsing template:', error);
       setTokens([]);
@@ -206,20 +304,22 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
   // Toggle between chip view and text input
   function toggleTextInput() {
     if (showTextInput) {
-      // Switching to chip view - parse current text
-      try {
-        const template = createTemplateFromText(textInput, sessionId);
-        setTokens(template.slots);
-      } catch (error) {
-        console.log('🔍 Error parsing template in toggle:', error);
-        setTokens([]);
-      }
+      // Switching to chip view - parse current text using hydrator
+      handleTextInputChange(textInput);
     } else {
       // Switching to text view - convert current tokens to text
-      const text = '[' + tokens.map(t => t.kind === 'chunk' ? (t.chunkPattern ?? '') : `${t.pos}${t.index ?? ''}`).join('-') + ']';
-      setTextInput(text);
+      setTextInput(tokensToPatternString(tokens));
     }
     setShowTextInput(!showTextInput);
+  }
+
+  // Build a correct pattern string from slots/chunks: separate tokens by spaces.
+  function tokensToPatternString(list: SlotDescriptor[]): string {
+    return list.map(t =>
+      t.kind === 'chunk'
+        ? `[CHUNK:[${t.chunkPattern ?? ''}]]`
+        : `[${t.pos}${t.index ?? ''}]`
+    ).join(' ');
   }
 
   return (
@@ -474,30 +574,44 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
       <div className="card p-6 rounded-lg shadow-lg">
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-semibold text-gray-800">Session Templates</h3>
-          <div className="text-sm text-gray-600">{sessionTemplates.length} total</div>
+          <div className="text-sm text-gray-600">{userTemplates.length} total</div>
         </div>
         <div className="space-y-2">
-          {sessionTemplates.map(t => (
+          {userTemplates.map(t => (
             <div key={t.id} className="flex items-center justify-between border rounded px-2 py-1">
               <div className="truncate text-sm">{t.text}</div>
               <div className="flex items-center gap-2">
                 <span className="bg-gray-200 px-2 py-1 rounded text-xs">template</span>
                 <button
                   className="btn-secondary px-2 py-1 rounded text-xs"
-                  onClick={() => updateSessionTemplate(sessionId, t.id, { pinned: !t.pinned })}
+                  onClick={async () => {
+                    try {
+                      await TemplateStore.update(t.id, {});
+                      // Note: pinned functionality will be added in a future update
+                    } catch (error) {
+                      console.error('Failed to update template:', error);
+                    }
+                  }}
                 >
                   {t.pinned ? '🔓 Unlock' : '🔒 Lock'}
                 </button>
                 <button
                   className="btn-secondary px-2 py-1 rounded text-xs"
-                  onClick={() => removeSessionTemplate(sessionId, t.id)}
+                  onClick={async () => {
+                    try {
+                      await TemplateStore.remove(t.id);
+                      refreshUserTemplates();
+                    } catch (error) {
+                      console.error('Failed to remove template:', error);
+                    }
+                  }}
                 >
                   🗑️
                 </button>
               </div>
             </div>
           ))}
-          {!sessionTemplates.length && <div className="text-sm text-muted-foreground">No session templates yet.</div>}
+          {!userTemplates.length && <div className="text-sm text-muted-foreground">No session templates yet.</div>}
         </div>
       </div>
 
@@ -512,13 +626,7 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
           <button
             className="btn-primary px-4 py-2 rounded text-sm flex items-center justify-center gap-2"
             onClick={async () => {
-              try {
-                await saveAllTemplates();
-                alert('All templates saved to file successfully!');
-              } catch (error) {
-                console.error('Failed to save templates:', error);
-                alert('Failed to save templates to file. Check console for details.');
-              }
+              alert('Export functionality will be implemented in the next update. Templates are now stored in the One True Store!');
             }}
           >
             💾 Save
@@ -527,14 +635,7 @@ export default function TemplateEditor({ sessionId, onClose, graph }: Props) {
           <button
             className="btn-secondary px-4 py-2 rounded text-sm flex items-center justify-center gap-2"
             onClick={async () => {
-              try {
-                await loadTemplatesFromFile();
-                alert('Templates loaded from file successfully!');
-                // Templates are automatically refreshed from the session
-              } catch (error) {
-                console.error('Failed to load templates:', error);
-                alert('Failed to load templates from file. Check console for details.');
-              }
+              alert('File import will be implemented in the next update. Templates are now stored in the One True Store!');
             }}
           >
             📂 Load

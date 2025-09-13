@@ -206,6 +206,7 @@ export type TemplateBlock = TextBlock | PhraseBlock;
 
 export interface TemplateDoc {
   id: string;
+  text: string;  // Original template text for display
   blocks: TemplateBlock[];
   createdInSessionId: string;
 }

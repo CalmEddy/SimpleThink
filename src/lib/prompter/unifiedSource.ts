@@ -30,7 +30,13 @@ export async function templateDocsFromGraph(
     acc.push(...chunks);
   }
   const list = opts?.filter ? acc.filter(opts.filter) : acc.slice();
-  if (opts?.shuffle) list.sort(() => Math.random() - 0.5);
+  if (opts?.shuffle) {
+    // Use unified randomization service for consistent shuffling
+    const { RandomizationConfigManager } = await import('../randomization/index.js');
+    const configManager = RandomizationConfigManager.getInstance();
+    const randomizationService = await configManager.createService();
+    list.sort(() => randomizationService.pickFromArray([-1, 1])!);
+  }
   const trimmed = typeof opts?.limit === "number" ? list.slice(0, opts.limit) : list;
 
   const docs: TemplateDoc[] = [];

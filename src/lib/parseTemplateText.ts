@@ -1,6 +1,6 @@
 import { BindingSpec, TemplateToken, UnifiedTemplate, POS, MorphFeature } from '../types/index.js';
 
-const SLOT_RE = /^\[([A-Z:]+)(\d+)?\]$/;                 // [NOUN], [VERB:past], [NOUN1]
+const SLOT_RE = /^\[([A-Za-z:]+)(\d+)?\]$/;              // [NOUN], [VERB:past], [NOUN1]
 const LIT_RE  = /^\[LIT:(.+?)\]$/;                        // [LIT:life]
 const CHUNK_RE= /^\[CHUNK:\[([A-Za-z0-9:-]+)\]\]$/;        // [CHUNK:[ADJ-NOUN]]
 
@@ -88,21 +88,36 @@ function bindIdFor(pos: POS, n: string): string {
 function splitDSL(s: string): string[] {
   const out: string[] = [];
   let i = 0;
+  let currentText = '';
+  
   while (i < s.length) {
     if (s[i] === '[') {
+      // Save any accumulated text as a single unit
+      if (currentText.trim()) {
+        out.push(currentText.trim());
+        currentText = '';
+      }
+      
+      // Extract bracketed pattern
       const j = findMatchingBracket(s, i);
-      out.push(s.slice(i, j + 1));
+      const bracketContent = s.slice(i, j + 1);
+      out.push(bracketContent);
       i = j + 1;
+      
+      // Skip spaces after bracket but don't accumulate them
       while (s[i] === ' ') i++;
     } else {
-      // gather until space or bracket
-      let j = i;
-      while (j < s.length && s[j] !== ' ' && s[j] !== '[') j++;
-      out.push(s.slice(i, j));
-      i = j;
-      while (s[i] === ' ') i++;
+      // Accumulate text (including spaces for natural language)
+      currentText += s[i];
+      i++;
     }
   }
+  
+  // Don't forget trailing text
+  if (currentText.trim()) {
+    out.push(currentText.trim());
+  }
+  
   return out.filter(Boolean);
 }
 
@@ -117,3 +132,4 @@ function findMatchingBracket(s: string, start: number): number {
   }
   throw new Error('Unbalanced brackets in template DSL');
 }
+

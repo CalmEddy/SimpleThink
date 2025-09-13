@@ -4,7 +4,7 @@ import type { TemplateMutator, MutatorUtils } from './prompter/index.js';
 import type { ContextualNodeSets } from '../contexts/ActiveNodesContext.js';
 import { TEMPLATES, getRandomWordForSlot } from './templates.js';
 import { surfaceRelatedPhrases } from './retrieve.js';
-import { listSessionTemplates } from './userTemplates.js';
+import { listSessionTemplates, listSessionTemplateDocs } from './userTemplates';
 import { getSessionLocks } from './sessionLocks.js';
 import { ensureDefaultProfileExists } from './sessionProfiles.js';
 import wordBank from './templates.js';
@@ -15,6 +15,12 @@ import { Prompter, mutatorJitter30, mutatorAutoBind, mutatorEnsure2Random, mutat
 import { templateDocsFromGraph } from './prompter/unifiedSource.js';
 import { parseTextPatternsToUTA } from '../components/ComposerEditor.js';
 import { convertTemplateDocToUnified } from './composer.js';
+import { 
+  UnifiedRandomizationService, 
+  RandomizationConfigManager,
+  type RandomizationConfig,
+  type SlotRandomizationConfig
+} from './randomization/index.js';
 
 export interface PromptResult {
   promptText: string;
@@ -27,6 +33,10 @@ export class PromptEngine {
   
   // Single Prompter instance for reuse
   private prompter: Prompter | null = null;
+  
+  // Unified randomization service
+  private randomizationService: UnifiedRandomizationService;
+  private configManager: RandomizationConfigManager;
   
   // Cached mutators to avoid recreation
   private cachedMutators: TemplateMutator[] | null = null;
@@ -59,6 +69,10 @@ export class PromptEngine {
       "NOUN", "VERB", "ADJ", "ADV", "DET", "PRON", "ADP", "AUX", "CONJ", "SCONJ", "PART", "NUM", "INTJ", "PROPN"
     ] as const as POS[];
     this.posRandomP = ALL_POS.reduce((acc, pos) => (acc[pos] = 0, acc), {} as Record<POS, number>);
+    
+    // Initialize unified randomization service
+    this.configManager = RandomizationConfigManager.getInstance();
+    this.randomizationService = null as any; // Will be initialized in loadFromDefaultProfile
   }
 
   static getInstance(): PromptEngine {
@@ -71,7 +85,7 @@ export class PromptEngine {
   /**
    * Load configuration from the default profile
    */
-  loadFromDefaultProfile(sessionId: string): void {
+  async loadFromDefaultProfile(sessionId: string): Promise<void> {
     try {
       const defaultProfile = ensureDefaultProfileExists(sessionId);
       
@@ -92,6 +106,10 @@ export class PromptEngine {
       this.posRandomP = { ...defaultProfile.posRandomP };
       this.regexText = defaultProfile.regexText;
       this.regexRandomizeP = defaultProfile.regexRandomizeP;
+      
+      // Update unified randomization service configuration
+      this.configManager.loadFromProfile(defaultProfile);
+      this.randomizationService = await this.configManager.createService();
       
       // Clear cached mutators to force rebuild with new settings
       this.cachedMutators = null;
@@ -139,6 +157,9 @@ export class PromptEngine {
     if (config.posRandomP !== undefined) this.posRandomP = { ...config.posRandomP };
     if (config.regexText !== undefined) this.regexText = config.regexText;
     if (config.regexRandomizeP !== undefined) this.regexRandomizeP = config.regexRandomizeP;
+    
+    // Update unified randomization service with new configuration
+    this.updateRandomizationServiceConfig();
     
     // Clear cached mutators to force rebuild with new settings
     this.cachedMutators = null;
@@ -199,7 +220,7 @@ export class PromptEngine {
           promptText = promptText.replace(`[${slot}]`, wordText);
         } else {
           // Fall back to word bank
-          const fallbackWord = this.getFallbackWord(slot, graph);
+          const fallbackWord = await this.getFallbackWord(slot, graph);
           bindings.push({
             slot,
             fillerNodeId: fallbackWord.id,
@@ -282,9 +303,9 @@ export class PromptEngine {
     return null;
   }
 
-  private getFallbackWord(slot: string, graph: SemanticGraphLite): any {
+  private async getFallbackWord(slot: string, graph: SemanticGraphLite): Promise<any> {
     // FIRST: Try word bank (controlled vocabulary)
-    const wordText = getRandomWordForSlot(slot);
+    const wordText = await getRandomWordForSlot(slot);
     const wordBankWord = graph.upsertWord(wordText, wordText.toLowerCase(), [slot]);
     
     // SECOND: Fall back to existing graph words only if word bank fails
@@ -466,49 +487,35 @@ export class PromptEngine {
       const out: TemplateDoc[] = [];
 
       // Get user templates if sessionId is provided
-      let userTemplates: any[] = [];
+      let userTemplates: TemplateDoc[] = [];
       if (sessionId) {
-        userTemplates = listSessionTemplates(sessionId);
+        userTemplates = listSessionTemplateDocs(sessionId);
       }
 
-      // Calculate how many templates to use from each source
-      const totalTemplates = Math.max(1, (activeCtx?.phrases?.length ?? 0) + (activeCtx?.chunks?.length ?? 0) + userTemplates.length);
-      const userTemplateCount = Math.round(totalTemplates * templateMixRatio);
-      const generatedTemplateCount = totalTemplates - userTemplateCount;
-
-      // 1) Add user templates based on mix ratio
-      if (userTemplates.length > 0 && userTemplateCount > 0) {
-        const userTemplatesToUse = Math.min(userTemplateCount, userTemplates.length);
-        const shuffledUserTemplates = [...userTemplates].sort(() => Math.random() - 0.5);
-        
-        for (let i = 0; i < userTemplatesToUse; i++) {
-          const template = shuffledUserTemplates[i];
-          // Convert UnifiedTemplate to TemplateDoc
-          const templateDoc = this.convertUnifiedTemplateToTemplateDoc(template);
-          out.push(templateDoc);
-        }
+      // Use ALL available templates - let the randomization pipeline cycle through them
+      // to achieve the requested count, rather than limiting the pool size
+      
+      // 1) Add ALL user templates
+      if (userTemplates.length > 0) {
+        const shuffledUserTemplates = [...userTemplates].sort(() => this.randomizationService?.pickFromArray([-1, 1]) ?? 0);
+        out.push(...shuffledUserTemplates);
       }
 
-      // 2) Add phrase-derived docs based on remaining ratio
-      const phrasesToUse = Math.min(generatedTemplateCount, activeCtx?.phrases?.length ?? 0);
-      if (phrasesToUse > 0) {
-        const shuffledPhrases = [...(activeCtx?.phrases ?? [])].sort(() => Math.random() - 0.5);
-        for (let i = 0; i < phrasesToUse; i++) {
-          const doc = this.buildDocFromPhraseNode(shuffledPhrases[i]);
+      // 2) Add ALL phrase-derived docs
+      if (activeCtx?.phrases && activeCtx.phrases.length > 0) {
+        const shuffledPhrases = [...activeCtx.phrases].sort(() => this.randomizationService?.pickFromArray([-1, 1]) ?? 0);
+        for (const phrase of shuffledPhrases) {
+          const doc = this.buildDocFromPhraseNode(phrase);
           out.push(doc);
         }
       }
 
-      // 3) Add chunk-derived docs if we still need more
-      const remainingSlots = generatedTemplateCount - phrasesToUse;
-      if (remainingSlots > 0) {
-        const chunksToUse = Math.min(remainingSlots, activeCtx?.chunks?.length ?? 0);
-        if (chunksToUse > 0) {
-          const shuffledChunks = [...(activeCtx?.chunks ?? [])].sort(() => Math.random() - 0.5);
-          for (let i = 0; i < chunksToUse; i++) {
-            const doc = this.buildDocFromChunkNode(shuffledChunks[i]);
-            out.push(doc);
-          }
+      // 3) Add ALL chunk-derived docs
+      if (activeCtx?.chunks && activeCtx.chunks.length > 0) {
+        const shuffledChunks = [...activeCtx.chunks].sort(() => this.randomizationService?.pickFromArray([-1, 1]) ?? 0);
+        for (const chunk of shuffledChunks) {
+          const doc = this.buildDocFromChunkNode(chunk);
+          out.push(doc);
         }
       }
 
@@ -516,42 +523,6 @@ export class PromptEngine {
     };
   }
 
-  /**
-   * Convert UnifiedTemplate to TemplateDoc for use in prompt generation
-   */
-  convertUnifiedTemplateToTemplateDoc(unifiedTemplate: any): TemplateDoc {
-    const blocks = unifiedTemplate.tokens.map((token: any) => {
-      if (token.kind === 'literal') {
-        return {
-          kind: 'text' as const,
-          text: token.surface
-        };
-      } else if (token.kind === 'slot') {
-        return {
-          kind: 'text' as const,
-          text: `[${token.pos}]`
-        };
-      } else if (token.kind === 'subtemplate') {
-        return {
-          kind: 'text' as const,
-          text: token.tokens.map((t: any) => 
-            t.kind === 'literal' ? t.surface : `[${t.pos || 'NOUN'}]`
-          ).join(' ')
-        };
-      } else {
-        return {
-          kind: 'text' as const,
-          text: ''
-        };
-      }
-    });
-
-    return {
-      id: unifiedTemplate.id,
-      blocks: blocks.filter((block: any) => block.text.trim() !== ''),
-      createdInSessionId: unifiedTemplate.createdInSessionId
-    };
-  }
 
   /**
    * Build configurable mutators system (moved from PrompterDevPanel) with caching
@@ -604,7 +575,7 @@ export class PromptEngine {
           const toRandomize = Math.min(this.maxRandomSlots, randomizableTokens.length);
           const selected = new Set<number>();
           while (selected.size < toRandomize && selected.size < randomizableTokens.length) {
-            const randomIndex = Math.floor(Math.random() * randomizableTokens.length);
+            const randomIndex = Math.floor((this.randomizationService?.pickFromArray([0, 1]) ?? 0) * randomizableTokens.length);
             selected.add(randomizableTokens[randomIndex].index);
           }
           
@@ -671,7 +642,7 @@ export class PromptEngine {
             const candidates: POS[] = t.pos ? [t.pos] : (t.posSet ?? []);
             const maxP = candidates.reduce((m, pos) => Math.max(m, (this.posRandomP[pos as POS] ?? 0) / 100), 0);
             if (maxP > 0 && /[A-Za-z]/.test(t.text)) {
-              if (Math.random() < maxP) return { ...t, randomize: true };
+              if ((this.randomizationService?.pickFromArray([0, 1]) ?? 0) < maxP) return { ...t, randomize: true };
             }
             return t;
           });
@@ -693,7 +664,7 @@ export class PromptEngine {
             const pb = b as PhraseBlock;
             if (!re!.test(pb.phraseText)) return pb;
             const tokens = pb.tokens.map((t: PhraseToken) => {
-              if (/[A-Za-z]/.test(t.text) && Math.random() < p) return { ...t, randomize: true };
+              if (/[A-Za-z]/.test(t.text) && (this.randomizationService?.pickFromArray([0, 1]) ?? 0) < p) return { ...t, randomize: true };
               return t;
             });
             return { ...pb, tokens } as PhraseBlock;
@@ -711,6 +682,54 @@ export class PromptEngine {
   }
 
   // ===== CONFIGURATION METHODS =====
+
+  /**
+   * Get randomization logs for debugging
+   */
+  getRandomizationLogs(): any[] {
+    if (!this.randomizationService) {
+      return [];
+    }
+    return this.randomizationService.getLogs();
+  }
+
+  /**
+   * Clear randomization logs
+   */
+  clearRandomizationLogs(): void {
+    if (!this.randomizationService) {
+      return;
+    }
+    this.randomizationService.clearLogs();
+  }
+
+  /**
+   * Update the unified randomization service configuration
+   */
+  private updateRandomizationServiceConfig(): void {
+    // Only update if the randomization service has been initialized
+    if (!this.randomizationService) {
+      return;
+    }
+
+    const slotConfig: SlotRandomizationConfig = {
+      jitterP: this.jitterP / 100,
+      posRandomP: this.posRandomP,
+      maxRandomSlots: this.maxRandomSlots,
+      usePositionBasedRandom: this.usePositionBasedRandom,
+      targetPOS: this.targetPOS,
+      targetPosition: this.targetPosition,
+      useClickableSelection: this.useClickableSelection,
+      selectedWordIndices: this.selectedWordIndices,
+      regexText: this.regexText,
+      regexRandomizeP: this.regexRandomizeP
+    };
+
+    // Update the randomization service configuration
+    this.randomizationService.updateConfig({
+      enableLogging: true // Enable logging for debugging
+    });
+  }
 
   /**
    * Configure mutator settings
@@ -803,28 +822,54 @@ export class PromptEngine {
     seed?: number,
     templateMixRatio = 0.5
   ): Promise<EphemeralPrompt[]> {
-    const rng = seed ? { next: () => Math.random() } : undefined; // Simple RNG for now
+    // Use the unified randomization service for consistent RNG
+    const rng = seed ? { next: () => this.randomizationService?.pickFromArray([0, 1]) ?? 0 } : undefined;
     const out: EphemeralPrompt[] = [];
     const recentTexts = new Set<string>();
+    
+    // Infinite loop protection
+    const maxAttempts = count * 10; // Allow up to 10x attempts to find unique prompts
+    let attempts = 0;
+    let consecutiveFailures = 0;
+    const maxConsecutiveFailures = 50; // Stop if we can't generate new prompts after 50 attempts
 
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count && attempts < maxAttempts && consecutiveFailures < maxConsecutiveFailures; i++) {
+      attempts++;
+      
       try {
         const res = await this.generateEnhancedPrompt(activeCtx, graph, sessionId, rng, undefined, undefined, templateMixRatio);
         
-        if (recentTexts.has(res.prompt)) continue;
+        // Check for duplicates, but retry instead of skipping
+        if (recentTexts.has(res.prompt)) {
+          consecutiveFailures++;
+          i--; // Decrement i to retry this iteration
+          continue;
+        }
+        
+        // Reset consecutive failures counter on successful generation
+        consecutiveFailures = 0;
         recentTexts.add(res.prompt);
+
+        // Generate random seed using unified service
+        const randomSeed = seed ? String(seed) : 'r' + Math.floor((this.randomizationService?.pickFromArray([0, 1]) ?? 0) * 1e9);
 
         out.push({
           templateId: res.templateId,
           templateSignature: 'ENHANCED-GENERATED',
           text: res.prompt,
           bindings: [], // Prompter doesn't provide detailed bindings yet
-          randomSeed: String(seed ?? 'r' + Math.floor(Math.random() * 1e9)),
+          randomSeed,
         });
       } catch (error) {
         console.warn('Enhanced prompt generation failed:', error);
-        continue;
+        consecutiveFailures++;
+        i--; // Decrement i to retry this iteration
       }
+    }
+
+    // Log warning if we couldn't generate the requested number of unique prompts
+    if (out.length < count) {
+      console.warn(`Generated ${out.length} prompts instead of requested ${count}. This may be due to limited template variety or word availability.`);
     }
 
     return out;

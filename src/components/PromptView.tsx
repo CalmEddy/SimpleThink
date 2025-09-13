@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { SemanticGraphLite } from '../lib/semanticGraphLite.js';
-import { recordResponse, promoteResponseToPhrase, rateResponse } from '../lib/respond.js';
-import { generateEphemeralPrompts } from '../lib/promptEngineBridge.js';
+import { recordResponse, promoteResponseToPhrase, rateResponse, reassembleCompleteResponse, getResponsesForPrompt as getResponsesForPromptUtil } from '../lib/respond.js';
+// Use the TypeScript bridge that realizes TemplateDocs via the Composer pipeline
+import { generateEphemeralPrompts } from '../lib/promptEngineBridge';
 import { useActiveNodesWithGraph } from '../contexts/ActiveNodesContext.js';
-import { listSessionTemplates, removeSessionTemplate } from '../lib/userTemplates.js';
+import { TemplateStore } from '../lib/templateStore';
 import type { PromptNode, ResponseNode, EphemeralPrompt } from '../types/index.js';
 
 interface PromptViewProps {
@@ -14,6 +15,7 @@ interface PromptViewProps {
 
 export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: PromptViewProps) {
   const { ctx, contextFrame } = useActiveNodesWithGraph(graph);
+  const sessionId = contextFrame?.sessionId || '__global__';
   const [selectedPrompt, setSelectedPrompt] = useState<PromptNode | null>(null);
   const [selectedEphemeralPrompt, setSelectedEphemeralPrompt] = useState<EphemeralPrompt | null>(null);
   const [responseText, setResponseText] = useState('');
@@ -23,30 +25,59 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
   const [ephemeralPrompts, setEphemeralPrompts] = useState<EphemeralPrompt[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationCount, setGenerationCount] = useState(10);
-  const [userTemplates, setUserTemplates] = useState<any[]>([]);
+  const [userTemplates, setUserTemplates] = useState<Array<{ id: string; text: string }>>([]);
+
+  const refreshUserTemplates = async () => {
+    try {
+      const list = await TemplateStore.listAll();
+      setUserTemplates(list.map(t => ({ 
+        id: t.id, 
+        text: t.displayText 
+      })));
+    } catch {
+      setUserTemplates([]);
+    }
+  };
   const [selectedTemplate, setSelectedTemplate] = useState<any | null>(null);
   const [templateMixRatio, setTemplateMixRatio] = useState(0.5); // 0 = all generated, 1 = all user templates
+  const [usePhraseSplitting, setUsePhraseSplitting] = useState(false);
 
   const prompts = graph.getNodesByType('PROMPT') as PromptNode[];
   const responses = graph.getNodesByType('RESPONSE') as ResponseNode[];
 
   // Load user templates when component mounts
   useEffect(() => {
-    if (contextFrame?.sessionId) {
-      const templates = listSessionTemplates(contextFrame.sessionId);
-      setUserTemplates(templates);
+    refreshUserTemplates();
+  }, [sessionId]);
+
+  useEffect(() => {
+    const onChanged = (e: any) => {
+      if (!e?.detail?.sessionId || e.detail.sessionId === sessionId) refreshUserTemplates();
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'OTS_TEMPLATES') refreshUserTemplates();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('prompter:templates-changed', onChanged);
+      window.addEventListener('storage', onStorage);
     }
-  }, [contextFrame?.sessionId]);
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('prompter:templates-changed', onChanged);
+        window.removeEventListener('storage', onStorage);
+      }
+    };
+  }, [sessionId]);
 
   // Generate new prompts when component mounts or context changes
   useEffect(() => {
     if (contextFrame?.sessionId && ctx.words.length > 0) {
       generateNewPrompts();
     }
-  }, [contextFrame?.sessionId, ctx.words.length]);
+  }, [sessionId, ctx.words.length]);
 
   const generateNewPrompts = async () => {
-    if (!contextFrame?.sessionId) return;
+    if (!sessionId) return;
     
     try {
       setIsGenerating(true);
@@ -54,8 +85,8 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
       // Use the enhanced PromptEngine through the bridge
       const newPrompts = await generateEphemeralPrompts(
         graph,
-        ctx,
-        contextFrame.sessionId,
+        ctx || { words: [], phrases: [], chunks: [] },
+        sessionId,
         generationCount,
         undefined, // seed
         templateMixRatio // template mix ratio
@@ -64,10 +95,7 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
       setEphemeralPrompts(newPrompts);
       
       // Refresh templates list to ensure it's up to date
-      if (contextFrame?.sessionId) {
-        const templates = listSessionTemplates(contextFrame.sessionId);
-        setUserTemplates(templates);
-      }
+      refreshUserTemplates();
     } catch (error) {
       onError(error instanceof Error ? error.message : 'Failed to generate prompts');
     } finally {
@@ -99,13 +127,10 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
     }
 
     try {
-      await removeSessionTemplate(contextFrame?.sessionId || '', templateId);
+      await TemplateStore.remove(templateId);
       
       // Refresh templates list
-      if (contextFrame?.sessionId) {
-        const templates = listSessionTemplates(contextFrame.sessionId);
-        setUserTemplates(templates);
-      }
+      refreshUserTemplates();
       
       // Clear selection if deleted template was selected
       if (selectedTemplate?.id === templateId) {
@@ -130,7 +155,7 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
       
       if (selectedPrompt) {
         // Responding to existing stored prompt
-        const result = await recordResponse(selectedPrompt.id, responseText.trim(), graph);
+        const result = await recordResponse(selectedPrompt.id, responseText.trim(), graph, undefined, usePhraseSplitting);
         setLastResponse(result.responseNode);
       } else if (selectedEphemeralPrompt && contextFrame) {
         // Responding to ephemeral prompt - convert to stored prompt first
@@ -145,10 +170,10 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
 
         // Link to topic/session
         graph.addEdge(promptNode.id, contextFrame.topicId, 'PROMPT_ABOUT_TOPIC');
-        graph.addEdge(promptNode.id, contextFrame.sessionId, 'CREATED_IN_SESSION');
+        graph.addEdge(promptNode.id, sessionId, 'CREATED_IN_SESSION');
 
         // Record response
-        const result = await recordResponse(promptNode.id, responseText.trim(), graph);
+        const result = await recordResponse(promptNode.id, responseText.trim(), graph, undefined, usePhraseSplitting);
         setLastResponse(result.responseNode);
         
         // Remove from ephemeral list and add to stored prompts
@@ -184,7 +209,7 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
   };
 
   const getResponsesForPrompt = (promptId: string) => {
-    return responses.filter(response => response.promptId === promptId);
+    return getResponsesForPromptUtil(promptId, graph);
   };
 
   const currentPrompt = selectedPrompt || selectedEphemeralPrompt;
@@ -324,7 +349,11 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
                   }`}
                   onClick={() => handleEphemeralPromptSelect(prompt)}
                 >
-                  <div className="font-medium text-gray-800">{prompt.text}</div>
+                  <div className="font-medium text-gray-800">
+                    {prompt.text && prompt.text.trim().length > 0
+                      ? prompt.text
+                      : <span className="text-gray-500 italic">[empty after realization]</span>}
+                  </div>
                   <div className="text-sm text-gray-600 mt-1">
                     Template: {prompt.templateId} • {prompt.bindings?.length || 0} bindings
                   </div>
@@ -397,6 +426,27 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
                     disabled={isSubmitting}
                   />
                 </div>
+
+                {/* Phrase Splitting Toggle */}
+                <div className="flex items-center space-x-3">
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={usePhraseSplitting}
+                      onChange={(e) => setUsePhraseSplitting(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                    />
+                    <span className="text-sm font-medium text-gray-700">
+                      Split responses into phrases
+                    </span>
+                  </label>
+                  <div className="text-xs text-gray-500">
+                    {usePhraseSplitting ? 
+                      'Each sentence will be stored as a separate response' : 
+                      'Entire response will be stored as one unit'
+                    }
+                  </div>
+                </div>
                 
                 <button
                   onClick={handleSubmitResponse}
@@ -422,11 +472,44 @@ export default function PromptViewEnhanced({ graph, onGraphUpdate, onError }: Pr
           {/* Last Response */}
           {lastResponse && (
             <div className="card p-6 rounded-lg shadow-lg slide-in">
-              <h3 className="text-xl font-semibold text-gray-800 mb-4">Last Response</h3>
+              <h3 className="text-xl font-semibold text-gray-800 mb-4">
+                {usePhraseSplitting ? 'Response Phrases' : 'Last Response'}
+              </h3>
               <div className="space-y-3">
-                <div className="bg-green-50 p-3 rounded-lg">
-                  <div className="font-medium text-gray-800">{lastResponse.text}</div>
-                </div>
+                {/* Show individual phrases if phrase splitting was used */}
+                {usePhraseSplitting && selectedPrompt && (
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-medium text-gray-700">Individual Phrases:</h4>
+                    {getResponsesForPrompt(selectedPrompt.id).map((response, index) => (
+                      <div key={response.id} className="bg-blue-50 p-3 rounded-lg">
+                        <div className="font-medium text-gray-800">
+                          Phrase {index + 1}: {response.text}
+                        </div>
+                        <div className="text-xs text-gray-600 mt-1">
+                          POS: <code className="bg-gray-100 px-1 py-0.5 rounded">{response.posPattern}</code>
+                        </div>
+                      </div>
+                    ))}
+                    
+                    {/* Show reassembled complete response */}
+                    <div className="mt-4">
+                      <h4 className="text-sm font-medium text-gray-700">Complete Response:</h4>
+                      <div className="bg-green-50 p-3 rounded-lg">
+                        <div className="font-medium text-gray-800">
+                          {reassembleCompleteResponse(selectedPrompt.id, graph)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {/* Show single response if phrase splitting was not used */}
+                {!usePhraseSplitting && (
+                  <div className="bg-green-50 p-3 rounded-lg">
+                    <div className="font-medium text-gray-800">{lastResponse.text}</div>
+                  </div>
+                )}
+                
                 <div className="text-sm text-gray-600">
                   POS Pattern: <code className="bg-gray-100 px-2 py-1 rounded text-xs">{lastResponse.posPattern}</code>
                 </div>

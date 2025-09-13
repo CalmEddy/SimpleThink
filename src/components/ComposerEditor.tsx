@@ -1,11 +1,32 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import type { TemplateDoc, TemplateBlock, TextBlock, PhraseBlock, PhraseToken, MorphFeature, POS, TemplateToken } from '../types';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
+import type { TemplateDoc, TemplateBlock, TextBlock, PhraseBlock, PhraseToken, MorphFeature, POS, TemplateToken, Node } from '../types';
 import { parseTML, serializeTML } from '../lib/tml';
 import { analyzeFreeText, resolvePhraseTokens, generateFromDocAsync, convertTemplateDocToUnified } from '../lib/composer';
 import { realizeTemplate } from '../lib/fillTemplate';
 import { wordBank } from '../lib/templates';
 import { parseTemplateTextToTokens } from '../lib/parseTemplateText';
-import { addSessionTemplate, saveAllTemplates, loadTemplatesFromFile, listSessionTemplates, removeSessionTemplate, updateSessionTemplate } from '../lib/userTemplates.js';
+import { ensureHydrated } from '../lib/ensureHydrated';
+// NOTE: use the typed store (localStorage + JSON import/export)
+import { TemplateStore } from '../lib/templateStore';
+import { NodeEditorComponent } from './NodeEditor';
+// import { saveTemplateRobust } from '../lib/templateSaving'; // Not used anymore
+
+// Optional pretty label for the list (for future use):
+// const docToPattern = (doc: TemplateDoc) => {
+//   const parts: string[] = [];
+//   for (const b of doc.blocks || []) {
+//     if ((b as any).kind === 'phrase') {
+//       for (const t of (b as any).tokens || []) {
+//         if (t.randomize && t.pos) parts.push(`[${t.pos}]`);
+//         else if (t.text) parts.push(t.text);
+//       }
+//     } else if ((b as any).kind === 'text') {
+//       const txt = (b as any).text || '';
+//       if (txt.trim()) parts.push(txt);
+//     }
+//   }
+//   return parts.join(' ').replace(/\s+/g, ' ').trim();
+// };
 
 type MorphMenuState = {
   open: boolean;
@@ -37,11 +58,10 @@ const POS_CHIPS: POS[] = [
   'AUX'
 ];
 
-// NOTE: Do not "optimize" this back to the legacy behavior.
 // Detect if input is template DSL or free text
+// Accepts basic slots [NOUN], multi-pos [NOUN-VERB], and nested chunks [CHUNK:[DET-ADJ-NOUN]]
 const isTemplateDSL = (text: string): boolean => {
-  // Check for template patterns like [NOUN], [VERB], [CHUNK:[...]], etc.
-  return /\[[A-Za-z0-9:]+(?:-[A-Za-z0-9:]+)*\]/.test(text);
+  return /\[[A-Za-z0-9:]+(?:-[A-Za-z0-9:]+)*\]/.test(text) || /\[CHUNK:\[[^\]]+\]\]/.test(text);
 };
 
 // Convert TemplateDoc to template text string for unified parsing
@@ -56,27 +76,27 @@ export const convertTemplateDocToText = (doc: TemplateDoc): string => {
       }
     } else if (block.kind === 'phrase') {
       const phraseBlock = block as PhraseBlock;
-      const posPattern = phraseBlock.tokens
-        .filter(token => token.randomize && token.pos)
-        .map(token => token.pos)
-        .join('-');
-
-      if (posPattern && phraseBlock.tokens.length > 1) {
+      // Only emit [CHUNK:[...]] if the ENTIRE phrase block is slots (no literals).
+      const allSlots = phraseBlock.tokens.length > 0 &&
+        phraseBlock.tokens.every(t => (t.randomize && !!t.pos));
+      if (allSlots) {
+        const posPattern = phraseBlock.tokens.map(t => t.pos).join('-');
         parts.push(`[CHUNK:[${posPattern}]]`);
-      } else {
-        const templatePattern = phraseBlock.tokens
-          .map(token => {
-            if (token.randomize && token.pos) {
-              const morph = token.morph && token.morph !== 'base' ? `:${token.morph}` : '';
-              const label = token.slotLabel ? `#${token.slotLabel}` : '';
-              return `[${token.pos}${morph}${label}]`;
-            } else {
-              return token.text;
-            }
-          })
-          .join(' ');
-        parts.push(templatePattern);
+        continue;
       }
+      // Otherwise, preserve mixed literals/slots as-is
+      const templatePattern = phraseBlock.tokens
+        .map(token => {
+          if (token.randomize && token.pos) {
+            const morph = token.morph && token.morph !== 'base' ? `:${token.morph}` : '';
+            const label = token.slotLabel ? `#${token.slotLabel}` : '';
+            return `[${token.pos}${morph}${label}]`;
+          } else {
+            return token.text;
+          }
+        })
+        .join(' ');
+      parts.push(templatePattern);
     }
   }
   
@@ -85,7 +105,7 @@ export const convertTemplateDocToText = (doc: TemplateDoc): string => {
 
 // This parser must hydrate slot tokens with POS (and optional bind/morph)
 // and must FLATTEN multi-POS patterns (e.g., [NOUN-VERB]) into real tokens.
-export const parseTextPatternsToUTA = async (doc: TemplateDoc, graph: any): Promise<TemplateDoc> => {
+export const parseTextPatternsToUTA = async (doc: TemplateDoc, _graph?: any): Promise<TemplateDoc> => {
   const parsedBlocks: TemplateBlock[] = [];
 
   for (const block of doc.blocks) {
@@ -93,126 +113,90 @@ export const parseTextPatternsToUTA = async (doc: TemplateDoc, graph: any): Prom
       const textBlock = block as TextBlock;
       const text = textBlock.text;
 
-      // Match bracketed patterns, including digits (bind ids) and morphs via colon.
-      // Examples accepted:
-      //  [NOUN-VERB-NOUN]
-      //  [DET] [NOUN] [NOUN2]
-      //  [VERB:participle] [ADJ] [PROPN1]
-      const patternRegex = /\[([A-Za-z0-9:]+(?:-[A-Za-z0-9:]+)*)\]/g;
-      const hasPatterns = patternRegex.test(text);
+      // We support both:
+      //   • basic slots: [NOUN] [VERB] [ADJ] (with optional bind/morph e.g., NOUN1 or VERB:participle or NOUN#1)
+      //   • nested chunks: [CHUNK:[DET-ADJ-NOUN]]
+      const CHUNK = /\[CHUNK:\[([A-Za-z0-9:]+(?:-[A-Za-z0-9:]+)*)\]\]/g;
+      const SLOT  = /\[([A-Za-z]+)(\d+)?(?::([A-Za-z_]+))?(?:#([A-Za-z0-9_]+))?\]/g;
 
-      if (hasPatterns) {
-        // Reset regex for parsing
-        patternRegex.lastIndex = 0;
-        const tplTokens: TemplateToken[] = [];
-        let lastIndex = 0;
-        let match;
-
-        while ((match = patternRegex.exec(text)) !== null) {
-          // Add literal text before the pattern
-          if (match.index > lastIndex) {
-            const literalText = text.slice(lastIndex, match.index).trim();
-            if (literalText) {
-              tplTokens.push({
-                kind: 'literal',
-                surface: literalText
-              });
-            }
-          }
-
-          // Parse the pattern
-          const pattern = match[1];
-          const posTags = pattern.split('-');
-
-          if (posTags.length === 1) {
-            // Single POS slot like [NOUN]
-            const raw = posTags[0];
-            const m = /^([A-Za-z]+)(\d+)?(?::([A-Za-z]+))?$/u.exec(raw);
-            const base = (m?.[1] ?? 'NOUN').toUpperCase();
-            const bind = m?.[2];
-            const morph = m?.[3]?.toLowerCase();
-            // Special shorthand: allow lone "participle" -> VERB:participle
+      const tplTokens: TemplateToken[] = [];
+      let i = 0;
+      // Utility to append literal safely (preserve spacing/punct as typed)
+      const pushLiteral = (s: string) => {
+        if (!s) return;
+        tplTokens.push({ kind: 'literal', surface: s });
+      };
+      while (i < text.length) {
+        CHUNK.lastIndex = i;
+        SLOT.lastIndex  = i;
+        const mChunk = CHUNK.exec(text);
+        const mSlot  = SLOT.exec(text);
+        const next = [mChunk, mSlot]
+          .filter(Boolean)
+          .sort((a, b) => (a!.index - b!.index))[0] as RegExpExecArray | undefined;
+        if (!next) {
+          // trailing literal
+          pushLiteral(text.slice(i));
+          break;
+        }
+        // leading literal
+        if (next.index > i) {
+          pushLiteral(text.slice(i, next.index));
+        }
+        // Handle match
+        if (next === mChunk) {
+          const inner = mChunk[1] ?? '';
+          const tags = inner.split('-').map(s => s.trim()).filter(Boolean);
+          tags.forEach((raw, idx) => {
+            const mm = /^([A-Za-z]+)(\d+)?(?::([A-Za-z_]+))?(?:#([A-Za-z0-9_]+))?$/.exec(raw);
+            const base = (mm?.[1] ?? 'NOUN').toUpperCase();
+            const bind = mm?.[2] ?? mm?.[4] ?? undefined;
+            const morph = mm?.[3]?.toLowerCase();
             const pos = base === 'PARTICIPLE' ? 'VERB' : base;
-            tplTokens.push({
-              kind: 'slot',
-              pos: pos as any,
-              morph: morph as any,
-              bindId: bind
-            });
-          } else {
-            // Multi-POS chunk like [VERB-DET-NOUN]
-            // Keep original hyphen joiner by inserting literal '-' between slots.
-            const chunkTokens: TemplateToken[] = [];
-            posTags.forEach((raw, idx) => {
-              const m = /^([A-Za-z]+)(\d+)?(?::([A-Za-z]+))?$/u.exec(raw);
-              const base = (m?.[1] ?? 'NOUN').toUpperCase();
-              const bind = m?.[2];
-              const morph = m?.[3]?.toLowerCase();
-              const pos = base === 'PARTICIPLE' ? 'VERB' : base;
-              chunkTokens.push({
-                kind: 'slot',
-                pos: pos as any,
-                morph: morph as any,
-                bindId: bind
-              });
-              if (idx < posTags.length - 1) {
-                chunkTokens.push({
-                  kind: 'literal',
-                  surface: '-'  // preserve hyphen joiner
-                });
-              }
-            });
-            // FLATTEN the chunk into the outer token stream (no opaque subtemplate)
-            tplTokens.push(...chunkTokens);
-          }
-
-          lastIndex = match.index + match[0].length;
-        }
-
-        // Add remaining literal text
-        if (lastIndex < text.length) {
-          const literalText = text.slice(lastIndex).trim();
-          if (literalText) {
-            tplTokens.push({
-              kind: 'literal',
-              surface: literalText
-            });
-          }
-        }
-
-        // Create ONLY a phrase block with parsed tokens (no text block)
-        if (tplTokens.length > 0) {
-          // Map template tokens to PhraseBlock tokens with POS fully hydrated.
-          const phraseTokens = tplTokens.flatMap((t) => {
-            if (t.kind === 'literal') {
-              return [{
-                text: t.surface,
-                randomize: false,
-                slotLabel: null,
-                lemma: t.surface,
-                morph: null
-              } as PhraseToken];
+            tplTokens.push({ kind: 'slot', pos: pos as any, morph: morph as any, bindId: bind });
+            if (idx < tags.length - 1) {
+              tplTokens.push({ kind: 'literal', surface: '-' });
             }
-            // Slot token → randomized phrase token with POS (and optional bind/morph)
-            return [{
-              text: `[${t.pos}]`,
-              lemma: '',
-              pos: (t.pos as any),
-              posSet: [t.pos as any],
-              randomize: true,
-              slotLabel: (t as any).bindId ?? null,
-              morph: (t as any).morph ?? null
-            } as PhraseToken];
           });
-
-          parsedBlocks.push({
-            kind: 'phrase',
-            phraseText: text,
-            tokens: phraseTokens
-          } as PhraseBlock);
+          i = CHUNK.lastIndex;
+          continue;
         }
+        // Single slot
+        if (next === mSlot) {
+          const base = (mSlot[1] ?? 'NOUN').toUpperCase();
+          const bind = mSlot[2] ?? mSlot[4] ?? undefined; // digits or #label
+          const morph = mSlot[3]?.toLowerCase();
+          const pos = base === 'PARTICIPLE' ? 'VERB' : base;
+          tplTokens.push({ kind: 'slot', pos: pos as any, morph: morph as any, bindId: bind });
+          i = SLOT.lastIndex;
+          continue;
+        }
+      }
+
+      if (tplTokens.length > 0) {
+        const phraseTokens: PhraseToken[] = tplTokens.map((t) => {
+          if (t.kind === 'literal') {
+            return {
+              text: t.surface,
+              randomize: false,
+              slotLabel: null,
+              lemma: t.surface,
+              morph: null
+            } as PhraseToken;
+          }
+          return {
+            text: `[${(t as any).pos}]`,
+            lemma: '',
+            pos: (t as any).pos,
+            posSet: [(t as any).pos],
+            randomize: true,
+            slotLabel: (t as any).bindId ?? null,
+            morph: (t as any).morph ?? null
+          } as PhraseToken;
+        });
+        parsedBlocks.push({ kind: 'phrase', phraseText: text, tokens: phraseTokens } as PhraseBlock);
       } else {
-        // No patterns, keep as text block
+        // No patterns at all → keep as free-text block
         parsedBlocks.push(block);
       }
     } else {
@@ -228,10 +212,12 @@ export const parseTextPatternsToUTA = async (doc: TemplateDoc, graph: any): Prom
 };
 
 export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
+  const effectiveSessionId = sessionId || '__global__';
   const [doc, setDoc] = useState<TemplateDoc>(() => ({
-    id: `doc_${sessionId}`,
+    id: `doc_${effectiveSessionId}`,
+    text: '',
     blocks: [{ kind: 'text', text: '' }] as TemplateBlock[],
-    createdInSessionId: sessionId,
+    createdInSessionId: effectiveSessionId,
   }));
   const [preview, setPreview] = useState<string>('');
   const [morphMenu, setMorphMenu] = useState<MorphMenuState>(null);
@@ -240,6 +226,12 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [userTemplates, setUserTemplates] = useState<any[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  
+  // NodeEditor state
+  const [editingNode, setEditingNode] = useState<Node | null>(null);
+
+  // This holds exactly what the preview used (hydrated TemplateDoc).
+  const lastPreviewDocRef = useRef<TemplateDoc | null>(null);
 
   // Get phrases from context
   const phrases = useMemo(() => {
@@ -249,17 +241,51 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
   }, [ctx?.phrases]);
 
   // Load user templates on component mount
+  const refreshUserTemplates = async () => {
+    try {
+      const list = await TemplateStore.listAll();
+      setUserTemplates(list.map(t => ({ 
+        id: t.id, 
+        text: t.displayText, 
+        tags: ['user'] 
+      })));
+      console.log('[ComposerEditor] refreshUserTemplates - showing ALL templates:', list);
+    } catch {
+      setUserTemplates([]);
+    }
+  };
+
+  // initial + on session change
   useEffect(() => {
-    const templates = listSessionTemplates(sessionId);
-    setUserTemplates(templates);
-  }, [sessionId]);
+    refreshUserTemplates();
+  }, [effectiveSessionId]);
+
+  // refresh on store changes and cross-tab updates
+  useEffect(() => {
+    const onChanged = (e: any) => {
+      if (!e?.detail?.sessionId || e.detail.sessionId === effectiveSessionId) refreshUserTemplates();
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'OTS_TEMPLATES') refreshUserTemplates();
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('prompter:templates-changed', onChanged);
+      window.addEventListener('storage', onStorage);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('prompter:templates-changed', onChanged);
+        window.removeEventListener('storage', onStorage);
+      }
+    };
+  }, [effectiveSessionId]);
 
   // Load a template into the composer
   const loadTemplateIntoComposer = async (template: any) => {
     try {
       setSelectedTemplateId(template.id);
       
-      // Convert UnifiedTemplate to TemplateDoc
+      // Convert StoredTemplate to TemplateDoc
       const templateText = template.text;
       
       // Parse the template text to create blocks
@@ -285,8 +311,9 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
         
         setDoc({
           id: template.id,
+          text: templateText,
           blocks: blocks,
-          createdInSessionId: sessionId
+          createdInSessionId: effectiveSessionId
         });
       } else {
         // Parse as free text
@@ -297,13 +324,15 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
         
         setDoc({
           id: template.id,
+          text: templateText,
           blocks: blocks,
-          createdInSessionId: sessionId
+          createdInSessionId: effectiveSessionId
         });
       }
       
-      // Update preview
+      // Update preview and raw text
       setPreview(templateText);
+      setRawText(templateText);
     } catch (error) {
       console.error('Failed to load template:', error);
       alert('Failed to load template. Check console for details.');
@@ -318,14 +347,14 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
     }
 
     try {
-      const currentText = convertTemplateDocToText(doc);
-      await updateSessionTemplate(sessionId, selectedTemplateId, {
+      // In raw text mode, use the rawText directly; otherwise convert from doc
+      const currentText = rawTextMode ? rawText : convertTemplateDocToText(doc);
+      await TemplateStore.update(selectedTemplateId, {
         text: currentText
       });
       
       // Refresh templates list
-      const templates = listSessionTemplates(sessionId);
-      setUserTemplates(templates);
+      refreshUserTemplates();
       
       alert('Template saved successfully!');
     } catch (error) {
@@ -341,11 +370,10 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
     }
 
     try {
-      await removeSessionTemplate(sessionId, templateId);
+      await TemplateStore.remove(templateId);
       
       // Refresh templates list
-      const templates = listSessionTemplates(sessionId);
-      setUserTemplates(templates);
+      refreshUserTemplates();
       
       // Clear selection if deleted template was selected
       if (selectedTemplateId === templateId) {
@@ -387,29 +415,33 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
       // Create a temporary doc with the raw text
       const tempDoc: TemplateDoc = {
         id: `temp_${Date.now()}`,
+        text: rawText,
         blocks: [{ kind: 'text', text: rawText }],
-        createdInSessionId: sessionId
+        createdInSessionId: effectiveSessionId
       };
 
       // Route to appropriate parser based on input type
       if (isTemplateDSL(rawText)) {
         // Template DSL: use parseTemplateTextToTokens
         const tokens = parseTemplateTextToTokens(rawText);
-        const unifiedTemplate = { tokens };
+        const unifiedTemplate = { 
+          id: `temp_${Date.now()}`,
+          text: rawText,
+          tokens,
+          createdInSessionId: effectiveSessionId
+        };
         const result = await realizeTemplate({
           tpl: unifiedTemplate,
           ctx: { 
-            words: graph?.getNodesByType('WORD') || [], 
-            phrases: graph?.getNodesByType('PHRASE') || [] 
+            words: graph?.getNodesByType('WORD') || []
           },
           lockedSet: new Set(),
           wordBank: { ...wordBank, ...(ctx?.words ? {} : {}) }
         });
         setPreview(result.surface);
       } else {
-        // Free text: use analyzeFreeText and generateFromDocAsync
-        const analysis = await analyzeFreeText(rawText, graph);
-        const s = await generateFromDocAsync(analysis, { graph });
+        // Free text: use generateFromDocAsync
+        const s = await generateFromDocAsync(tempDoc, { graph });
         setPreview(s);
       }
     } catch (error) {
@@ -421,25 +453,30 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
   };
 
   // ===== Stable preview (only for non-raw-text mode) =====
+  // Preview effect: hydrate -> realize -> set preview
   useEffect(() => {
     if (rawTextMode) return; // Don't auto-generate in raw text mode
     
+    let cancelled = false;
     (async () => {
-      // Use original parseTextPatternsToUTA pipeline for TemplateDoc
-      const parsedDoc = await parseTextPatternsToUTA(doc, graph);
-      const unifiedTemplate = convertTemplateDocToUnified(parsedDoc);
-      const result = await realizeTemplate({
-        tpl: unifiedTemplate,
-        ctx: { 
-          words: graph?.getNodesByType('WORD') || [], 
-          phrases: graph?.getNodesByType('PHRASE') || [] 
-        },
+      // 1) Hydrate the current doc (works for text- or phrase-based)
+      const hydrated = await ensureHydrated(doc);
+      if (cancelled) return;
+      lastPreviewDocRef.current = hydrated; // <-- capture exactly what preview uses
+
+      // 2) Realize for preview (using same UTA path Prompter uses)
+      const unified = convertTemplateDocToUnified(hydrated);
+      const res = await realizeTemplate({
+        tpl: unified,
+        ctx: { words: ctx?.words || [] },
         lockedSet: new Set(),
-        wordBank: { ...wordBank, ...(ctx?.words ? {} : {}) }
+        wordBank: {}
       });
-      setPreview(result.surface);
+      if (cancelled) return;
+      setPreview(res.surface);
     })();
-  }, [doc, graph, rawTextMode]);
+    return () => { cancelled = true; };
+  }, [doc, graph, ctx?.words, ctx?.phrases, rawTextMode]);
 
   // Update text editor when doc changes (but not in raw text mode)
   useEffect(() => {
@@ -486,31 +523,27 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
         }
       } else if (block.kind === 'phrase') {
         const phraseBlock = block as PhraseBlock;
-        
-        // Check if this is a chunk (has posPattern that looks like ADJ-NOUN-NOUN)
-        const posPattern = phraseBlock.tokens
-          .filter(token => token.randomize && token.pos)
-          .map(token => token.pos)
-          .join('-');
-        
-        if (posPattern && phraseBlock.tokens.length > 1) {
-          // This is a chunk - show as [CHUNK:[POS-POS-POS]]
+        // Only show [CHUNK:[...]] if the ENTIRE phrase is slots
+        const allSlots = phraseBlock.tokens.length > 0 &&
+          phraseBlock.tokens.every(t => (t.randomize && !!t.pos));
+        if (allSlots) {
+          const posPattern = phraseBlock.tokens.map(t => t.pos).join('-');
           templateParts.push(`[CHUNK:[${posPattern}]]`);
-        } else {
-          // This is a regular phrase - convert to template syntax
-          const templatePattern = phraseBlock.tokens
-            .map(token => {
-              if (token.randomize && token.pos) {
-                const morph = token.morph && token.morph !== 'base' ? `:${token.morph}` : '';
-                const label = token.slotLabel ? `#${token.slotLabel}` : '';
-                return `[${token.pos}${morph}${label}]`;
-              } else {
-                return token.text;
-              }
-            })
-            .join(' ');
-          templateParts.push(templatePattern);
+          continue;
         }
+        // Mixed → per-token representation
+        const templatePattern = phraseBlock.tokens
+          .map(token => {
+            if (token.randomize && token.pos) {
+              const morph = token.morph && token.morph !== 'base' ? `:${token.morph}` : '';
+              const label = token.slotLabel ? `#${token.slotLabel}` : '';
+              return `[${token.pos}${morph}${label}]`;
+            } else {
+              return token.text;
+            }
+          })
+          .join(' ');
+        templateParts.push(templatePattern);
       }
     }
     
@@ -686,7 +719,7 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
           <div className="mb-2 text-sm font-semibold mt-6">User Templates</div>
           <div className="max-h-48 overflow-y-auto space-y-2">
             {userTemplates.length > 0 ? (
-              userTemplates.map((template, idx) => (
+              userTemplates.map((template) => (
                 <div
                   key={template.id}
                   className={`text-left rounded border px-2 py-1 w-full ${
@@ -701,7 +734,9 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
                       onClick={() => loadTemplateIntoComposer(template)}
                       title={template.text}
                     >
-                      <div className="font-medium text-sm truncate">{template.text}</div>
+                      <div className="font-medium text-sm truncate">
+                        {(template.text && template.text.trim()) ? template.text : "(no text)"}
+                      </div>
                       {template.tags && template.tags.length > 0 && (
                         <div className="text-xs text-gray-500 mt-1">
                           Tags: {template.tags.join(', ')}
@@ -738,6 +773,30 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
               </button>
             </div>
           )}
+
+          {/* NodeEditor Demo */}
+          <div className="mt-3 pt-3 border-t">
+            <div className="text-xs text-gray-600 mb-2">Node Editor Demo:</div>
+            <button
+              className="w-full px-3 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+              onClick={() => {
+                // Demo: Create a mock phrase node for editing
+                const mockPhraseNode = {
+                  id: 'demo-phrase-1',
+                  type: 'PHRASE' as const,
+                  text: 'This is a demo phrase for editing',
+                  lemmas: ['this', 'is', 'a', 'demo', 'phrase', 'for', 'editing'],
+                  posPattern: 'DET VERB DET NOUN NOUN ADP NOUN',
+                  wordIds: ['word-1', 'word-2', 'word-3', 'word-4', 'word-5', 'word-6', 'word-7'],
+                  chunks: [],
+                  createdAt: Date.now()
+                };
+                setEditingNode(mockPhraseNode);
+              }}
+            >
+              🎯 Demo Edit Phrase Node
+            </button>
+          </div>
         </div>
         {/* Inline composer (always shows preview) */}
         <div className="flex-1">
@@ -920,7 +979,7 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
                 onClick={async () => {
                   const tml = prompt('Paste .tml');
                   if (!tml) return;
-                  const parsed = parseTML(tml, sessionId);
+                  const parsed = parseTML(tml, effectiveSessionId);
                   // Resolve tokens for any new phrase blocks
                   const resolvedBlocks: TemplateBlock[] = [];
                   for (const b of parsed.blocks) {
@@ -956,22 +1015,45 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
                   className="rounded bg-blue-600 text-white px-3 py-1 text-xs flex items-center justify-center gap-1"
                   onClick={async () => {
                     try {
-                      const templateText = convertTemplateDocToText(doc);
-                      await addSessionTemplate(sessionId, {
-                        text: templateText,
-                        pinned: false,
-                        tags: ['composer'],
-                        origin: 'user'
+                      // Prefer the exact hydrated doc that produced the preview.
+                      let toSave = lastPreviewDocRef.current;
+                      if (!toSave) {
+                        // Fallback: hydrate current doc
+                        toSave = await ensureHydrated(doc);
+                      }
+                      // Guard: if somehow still empty, attempt to hydrate from rawText mode
+                      if ((!toSave?.blocks || toSave.blocks.length === 0) && rawTextMode && (rawText || '').trim()) {
+                        const rawDoc: TemplateDoc = {
+                          id: `user_tpl_${Date.now()}`,
+                          createdInSessionId: 'user-templates',
+                          blocks: [{ kind: 'text', text: (rawText || '').trim() }]
+                        } as any;
+                        toSave = await ensureHydrated(rawDoc);
+                      }
+                      if (!toSave?.blocks || toSave.blocks.length === 0) {
+                        throw new Error('Empty template (no tokens/no text)');
+                      }
+
+                      console.log('[ComposerEditor] SAVE (hydrated preview) attempt', { 
+                        sid: effectiveSessionId, 
+                        blocks: toSave.blocks.length
+                      });
+
+                      // Persist using your existing userTemplates APIs
+                      const rec = await TemplateStore.save({
+                        sessionId: effectiveSessionId,
+                        doc: toSave
                       });
                       
+                      console.log('[ComposerEditor] SAVE ok', rec);
+                      
                       // Refresh templates list
-                      const templates = listSessionTemplates(sessionId);
-                      setUserTemplates(templates);
+                      refreshUserTemplates();
                       
                       alert('Template saved to session successfully!');
                     } catch (error) {
                       console.error('Failed to save template:', error);
-                      alert('Failed to save template to session. Check console for details.');
+                      alert(`Failed to save: ${(error as Error).message}`);
                     }
                   }}
                 >
@@ -981,13 +1063,7 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
                 <button
                   className="rounded border border-blue-600 text-blue-600 px-3 py-1 text-xs flex items-center justify-center gap-1"
                   onClick={async () => {
-                    try {
-                      await saveAllTemplates();
-                      alert('All templates saved to file successfully!');
-                    } catch (error) {
-                      console.error('Failed to save all templates:', error);
-                      alert('Failed to save all templates to file. Check console for details.');
-                    }
+                    alert('Export functionality will be implemented in the next update. Templates are now stored in the One True Store!');
                   }}
                 >
                   💾 Save
@@ -996,15 +1072,7 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
                 <button
                   className="rounded border border-green-600 text-green-600 px-3 py-1 text-xs flex items-center justify-center gap-1"
                   onClick={async () => {
-                    try {
-                      await loadTemplatesFromFile();
-                      alert('Templates loaded from file successfully!');
-                      // Refresh the templates list
-                      setUserTemplates(listSessionTemplates(sessionId));
-                    } catch (error) {
-                      console.error('Failed to load templates:', error);
-                      alert('Failed to load templates from file. Check console for details.');
-                    }
+                    alert('Import functionality will be implemented in the next update. Templates are now stored in the One True Store!');
                   }}
                 >
                   📂 Load
@@ -1047,6 +1115,27 @@ export default function ComposerEditor({ sessionId, graph, ctx }: Props) {
           />
         </div>
       ) : null}
+
+      {/* NodeEditor Modal */}
+      {editingNode && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="card p-6 rounded-lg shadow-lg max-w-md w-full mx-4">
+            <h3 className="text-xl font-semibold text-gray-800 mb-4">
+              Edit {editingNode.type}
+            </h3>
+            <NodeEditorComponent
+              node={editingNode}
+              graph={graph}
+              onUpdate={() => {
+                setEditingNode(null);
+                // Refresh any relevant data here
+              }}
+              onCancel={() => setEditingNode(null)}
+              contextFrame={undefined}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

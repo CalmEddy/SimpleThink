@@ -2,6 +2,7 @@ import { TemplateToken, UnifiedTemplate, SelectionSource, POS, MorphFeature } fr
 
 // Reuse your existing morphology util
 import { tenseConverter, type MorphologicalType } from './tenseConverter.js';
+import { RandomizationConfigManager } from './randomization/index.js';
 
 type ContextWord = {
   id: string;
@@ -51,8 +52,12 @@ export async function realizeTemplate(input: FillInput): Promise<FillResult> {
     // As a last resort, filter context by POS and pick a random compatible word
     const pool = (input.ctx?.words ?? []).filter((w:any) => posCompatible(token.pos, w.pos));
     if (pool.length) {
-      const w = pool[Math.floor(Math.random() * pool.length)];
-      return { surface: w.surface ?? w.text ?? w.lemma ?? "", lemma: w.lemma, pos: w.pos };
+      const configManager = RandomizationConfigManager.getInstance();
+      const randomizationService = await configManager.createService();
+      const w = randomizationService.pickFromArray(pool);
+      if (w) {
+        return { surface: w.surface ?? w.text ?? w.lemma ?? "", lemma: w.lemma, pos: w.pos };
+      }
     }
     // If absolutely nothing compatible exists, fall back to original attempt (let caller render literal)
     return { surface: token.fallbackLiteral ?? "", lemma: undefined, pos: token.pos };
@@ -129,7 +134,7 @@ async function pickByPolicy(
   
   for (const src of policy) {
     console.log('🔍 UTA DEBUG: Trying source:', src);
-    const picked = selectFromSource(src, input, pos, fallbackLiteral);
+    const picked = await selectFromSource(src, input, pos, fallbackLiteral);
     console.log('🔍 UTA DEBUG: Source result:', { src, picked });
     if (picked) {
       console.log('🔍 UTA DEBUG: SUCCESS with source:', src);
@@ -141,19 +146,19 @@ async function pickByPolicy(
   return { surface: '', pos: pos };
 }
 
-function selectFromSource(
+async function selectFromSource(
   src: SelectionSource,
   input: FillInput,
   pos: POS,
   fallbackLiteral?: string
-): { surface: string; lemma?: string; pos: POS } | null {
+): Promise<{ surface: string; lemma?: string; pos: POS } | null> {
   const { ctx, lockedSet, wordBank } = input;
 
   if (src === 'LOCKED') {
     console.log('🔍 UTA DEBUG: LOCKED source - checking locked words');
     const pool = ctx.words.filter(w => includesPOS(w.pos, pos) && lockedSet.has(w.id));
     console.log('🔍 UTA DEBUG: LOCKED pool size:', pool.length);
-    const w = pickWord(pool);
+    const w = await pickWord(pool);
     if (w) {
       console.log('🔍 UTA DEBUG: LOCKED found word:', w.text);
       return { surface: w.text, lemma: w.lemma, pos: pos };
@@ -187,7 +192,7 @@ function selectFromSource(
     console.log('🔍 UTA DEBUG: CONTEXT pool size after filtering:', pool.length);
     console.log('🔍 UTA DEBUG: CONTEXT pool words:', pool.map(w => w.text));
     
-    const w = pickWord(pool);
+    const w = await pickWord(pool);
     if (w) {
       console.log('🔍 UTA DEBUG: CONTEXT found word:', w.text);
       return { surface: w.text, lemma: w.lemma, pos: pos };
@@ -215,7 +220,7 @@ function selectFromSource(
   
   const fb = exact && exact.length ? exact : base;
   if (fb && fb.length) {
-    const selected = pickString(fb);
+    const selected = await pickString(fb);
     console.log('🔍 UTA DEBUG: BANK selected word:', selected);
     return { surface: selected, pos: pos };
   }
@@ -299,13 +304,17 @@ async function applyMorphIfNeeded(
   }
 }
 
-function pickWord<T>(arr: T[]): T | null {
+async function pickWord<T>(arr: T[]): Promise<T | null> {
   if (!arr.length) return null;
-  return arr[Math.floor(Math.random() * arr.length)];
+  const configManager = RandomizationConfigManager.getInstance();
+  const randomizationService = await configManager.createService();
+  return randomizationService.pickFromArray(arr);
 }
 
-function pickString(arr: string[]): string {
-  return arr[Math.floor(Math.random() * arr.length)];
+async function pickString(arr: string[]): Promise<string> {
+  const configManager = RandomizationConfigManager.getInstance();
+  const randomizationService = await configManager.createService();
+  return randomizationService.pickFromArray(arr) || '';
 }
 
 function tidySpacing(s: string): string {
